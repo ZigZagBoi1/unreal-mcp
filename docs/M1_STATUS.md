@@ -31,3 +31,5 @@ Last updated: 2026-08-07
 ### C++ plugin — `UnrealMCPBridge/`
 
 Location: `F:\!Projects\UnrealMCP\UnrealMCPBridge\` (source of truth), copied to
+`A:\UnrealProjects\AcmeGameUE58\Plugins\UnrealMCPBridge\` (build/runtime location).
+
