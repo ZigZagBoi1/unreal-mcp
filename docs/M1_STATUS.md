@@ -235,3 +235,4 @@ UnrealMCP/
     dist/                          (build output, gitignore-worthy but present/verified)
 
 A:\UnrealProjects\AcmeGameUE58\
+  AcmeGameUE58.uproject     (updated: UnrealMCPBridge added to Plugins[])
