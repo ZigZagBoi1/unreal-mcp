@@ -44,3 +44,4 @@ Deployed/build copy: `A:\UnrealProjects\AcmeGameUE58\Plugins\UnrealMCPBridge\`
 | `compile_blueprint` | Compiles and returns structured `{severity, text}` messages plus `errorCount`/`warningCount`/`success`/`status`. **This is the safety net for everything above it.** | `FKismetEditorUtilities::CompileBlueprint` with an `FCompilerResultsLog` |
 | `save_blueprint` | Saves the Blueprint's package to disk (same helper `create_blueprint` uses internally). | `UPackage::SavePackage` |
 
+Shared new helpers added to `FMCPCommandHandler`: `FindGraphByName`, `FindNodeById` (both
