@@ -174,3 +174,4 @@ source.
 
 ## Manual steps required from the user (do these in order)
 
+1. **Open `AcmeGameUE58.uproject` in UE 5.8**, if not already open from M1. The
