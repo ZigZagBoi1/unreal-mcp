@@ -61,3 +61,4 @@ UnrealMCP/
 
 ## Target dev project
 Duplicated from `M:\Unreal Projects\AcmeGameUE58` to `A:\UnrealProjects\AcmeGameUE58`
+(source-only copy, Binaries/Intermediate/Saved excluded, regenerated on first build).
