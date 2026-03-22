@@ -39,3 +39,5 @@ Deployed/build copy: `A:\UnrealProjects\AcmeGameUE58\Plugins\UnrealMCPBridge\`
 
 `FMCPProjectIndex` is a singleton owned by `FUnrealMCPBridgeModule` (`Initialize()` in
 `StartupModule`, `Shutdown()` in `ShutdownModule` — see `UnrealMCPBridgeModule.cpp`).
+Design choices, matching the M3 brief:
+
