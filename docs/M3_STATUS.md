@@ -41,3 +41,4 @@ Deployed/build copy: `A:\UnrealProjects\AcmeGameUE58\Plugins\UnrealMCPBridge\`
 `StartupModule`, `Shutdown()` in `ShutdownModule` — see `UnrealMCPBridgeModule.cpp`).
 Design choices, matching the M3 brief:
 
+- **On editor startup**: only registers the 5 AssetRegistry delegates (cheap — no
