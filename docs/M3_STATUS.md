@@ -90,3 +90,4 @@ New commands in `MCPCommandHandler.cpp` (dispatch-only; all real logic lives in
   real `AcmeGameUE58.uproject`, both required and both run this session.
 
 ### MCP server — 3 new tools + optional enrichment stage
+
