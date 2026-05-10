@@ -192,3 +192,4 @@ drive:
 
 ## Manual steps required from the user (do these in order)
 
+1. **Open `AcmeGameUE58.uproject` in UE 5.8.** All three milestones' plugin code
