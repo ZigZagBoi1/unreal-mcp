@@ -55,3 +55,10 @@ test("a genuine dialog is still a dialog, and PIE still outranks both", () => {
 test("the ordinary editor window alone means nothing is in the way", () => {
   assert.equal(classifyEditorWindows(["AcmeGame - Unreal Editor"]), null);
 });
+
+test("the Save Content prompt is named for what it is", () => {
+  // It is a child window: the main title stays "... Unreal Editor", which is why reading only main
+  // titles never saw it while it blocked a session for half an hour.
+  const found = classifyEditorWindows(["AcmeGameUE58 - Unreal Editor", "Save Content"]);
+  assert.deepEqual(found, { kind: "save", title: "Save Content" });
+});

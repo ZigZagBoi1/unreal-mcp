@@ -188,6 +188,7 @@ export async function autoLayoutGraph(
         y: Math.round(minY - BOX_PADDING - BOX_TITLE_HEIGHT),
         width: Math.round(maxX - minX + BOX_PADDING * 2),
         height: Math.round(maxY - minY + BOX_PADDING * 2 + BOX_TITLE_HEIGHT),
+        color: boxColorFor(title),
       });
       report.commentBoxesAdded.push(title);
       existingTitles.add(title);
@@ -197,4 +198,19 @@ export async function autoLayoutGraph(
   }
 
   return report;
+}
+
+/**
+ * A box colour by what the chain is, so a graph reads by area at a glance: networking blue, input
+ * and gameplay green, UI and effects yellow, debug or temporary red. Every machine-drawn box used to
+ * be the same white, which is the "all boxes look alike" complaint a style guide was written about.
+ * Anything unrecognised keeps the editor's default, which is better than a confident wrong colour.
+ */
+export function boxColorFor(title: string): { r: number; g: number; b: number } | undefined {
+  const t = title.toLowerCase();
+  if (/^(server_|client_|multicast_|mc_)|\bonrep_|replicat/.test(t)) return { r: 0.25, g: 0.45, b: 1 };
+  if (/\btemp\b|debug|test/.test(t)) return { r: 1, g: 0.3, b: 0.3 };
+  if (/widget|hud|\bui\b|fx|vfx|sound|audio|anim/.test(t)) return { r: 1, g: 0.85, b: 0.3 };
+  if (/input|ia_|beginplay|tick|overlap|hit|damage|fire|shoot|move|jump/.test(t)) return { r: 0.35, g: 0.85, b: 0.4 };
+  return undefined;
 }

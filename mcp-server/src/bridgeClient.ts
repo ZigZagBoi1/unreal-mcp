@@ -236,7 +236,7 @@ export function expandPathParams(params: Record<string, unknown> | undefined): R
  */
 /** What has the editor's window, when it is not the editor itself. */
 export interface ForegroundWindow {
-  kind: "pie" | "dialog" | "recovery";
+  kind: "pie" | "dialog" | "recovery" | "save";
   title: string;
 }
 
@@ -268,6 +268,12 @@ export function classifyEditorWindows(titles: string[]): ForegroundWindow | null
   if (recovery) {
     return { kind: "recovery", title: recovery };
   }
+  // Raised by closing the editor with unsaved work. It is a child window of the editor, which is
+  // why reading only each process's main title never saw it: that title stays "... Unreal Editor".
+  const save = foreign.find((t) => /^Save Content$/i.test(t));
+  if (save) {
+    return { kind: "save", title: save };
+  }
   return foreign.length > 0 ? { kind: "dialog", title: foreign[0] } : null;
 }
 
@@ -280,15 +286,24 @@ function blockingDialogTitle(): ForegroundWindow | null {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-Process -Name UnrealEditor -ErrorAction SilentlyContinue | " +
-          "Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }",
+        // Every top-level window of every editor process, not just its main one: a modal dialog is
+        // its own window while the main title stays "... Unreal Editor", so the old main-title read
+        // never saw the Save Content prompt that blocked a session for half an hour. UI Automation
+        // only reads titles; it focuses and clicks nothing.
+        "Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes; " +
+          "$root=[System.Windows.Automation.AutomationElement]::RootElement; " +
+          "Get-Process -Name UnrealEditor -ErrorAction SilentlyContinue | ForEach-Object { " +
+          "$c=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $_.Id); " +
+          "$root.FindAll([System.Windows.Automation.TreeScope]::Children, $c) | ForEach-Object { $_.Current.Name } }",
       ],
       // Short on purpose. This is a HINT appended to an error the caller is already waiting on, and
       // it runs after a timeout has just elapsed. Five seconds of PowerShell to improve the wording
       // of a failure is five seconds the caller spends learning nothing - and on a loaded machine it
       // pushed the whole reply past a client's own 15s budget, turning a clean tool error into a
       // protocol-level timeout. Better to lose the hint than the error.
-      { timeout: 1500, encoding: "utf8", windowsHide: true }
+      // 2500, not 1500: loading UI Automation adds about half a second, and a hint that always times
+      // out is the same as no hint.
+      { timeout: 2500, encoding: "utf8", windowsHide: true }
     );
     return classifyEditorWindows(
       String(out)
@@ -425,6 +440,10 @@ export class UnrealBridgeClient {
                     `command is served, so the bridge looks dead rather than blocked. Someone has to dismiss this ` +
                     `one, but it never needs to happen again: launch the editor with -AutoDeclinePackageRecovery, ` +
                     `the engine's own switch for exactly this, and it is declined automatically from then on.\n`
+                  : dialogTitle?.kind === "save"
+                    ? `  - THE "Save Content" PROMPT IS OPEN: the editor was asked to close with unsaved work, and ` +
+                      `it waits for a click. Saved/Autosaves/PackageRestoreData.json lists what is unsaved. Closing ` +
+                      `through unreal_restart_editor never raises this prompt, because it settles unsaved work first.\n`
                   : dialogTitle
                     ? `  - A modal dialog titled "${dialogTitle.title}" IS OPEN in the editor right now. That is almost ` +
                       `certainly the whole answer: it halts the game thread until a human clicks it.\n`
