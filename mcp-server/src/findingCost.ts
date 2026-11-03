@@ -93,6 +93,16 @@ export const FINDING_COST: Record<string, number> = {
   // not guarding. Runtime-confirmed on BP_FireWall.TakeDamage, 40 null reads a session.
   "branch-decides-nothing": 60,
   "tick-heavy": 55,
+  // Player 0 is the host on a listen server and nobody on a dedicated one: works alone, breaks online.
+  "player-index-zero": 65,
+  // Same cost as tick-heavy: per-frame work on every machine, for values that change rarely.
+  "widget-tick": 55,
+  // Not wrong today; it is the shape every server-side exploit starts from.
+  "server-event-unchecked": 35,
+  // Readability only, priced with the other layout and naming findings.
+  "stacked-nodes": 12,
+  "comment-too-long": 6,
+  "comment-box-one-node": 5,
   "level-sweep-maybe-repeating": 50,
   // Several Get All Actors Of Class in one graph: each walks the whole level, and if they are
   // looking for the same thing it is one sweep repeated. Priced beside graph-too-large because it is

@@ -19,6 +19,7 @@
 import { execTargets as followExec } from "./execFlow.js";
 import type { LayoutNode } from "./layout.js";
 import { groupIntoChains, isEventNode } from "./layout.js";
+import { styleFindings } from "./styleRules.js";
 
 export type Severity = "error" | "warning" | "info";
 
@@ -93,6 +94,8 @@ export interface ReviewContext {
    * indistinguishable from an unfinished function unless you know what the name is.
    */
   delegateNames?: Set<string>;
+  /** The Blueprint's parent class, for the house-style checks that only apply to widgets. */
+  parentClass?: string;
 }
 
 export function reviewGraph(graphName: string, allNodes: LayoutNode[], context: ReviewContext = {}): QualityReport {
@@ -645,6 +648,8 @@ export function reviewGraph(graphName: string, allNodes: LayoutNode[], context: 
       nodeIds: emptyEvents.map((node) => node.id),
     });
   }
+
+  findings.push(...styleFindings(allNodes, chains, { parentClass: context.parentClass }));
 
   const summary = {
     errors: findings.filter((f) => f.severity === "error").length,

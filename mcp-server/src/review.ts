@@ -114,11 +114,14 @@ export async function reviewBlueprint(
   const graphNodes: Array<{ graphName: string; nodes: unknown[] }> = [];
   const graphSizes = new Map<string, number>();
   for (const name of graphNames) {
+    // Positions too, so layout and comment boxes can be judged: the style checks need where a node
+    // sits and what a box says, not only what is wired to what.
     const summary = await bridge.send<ReadBlueprintGraphSummaryResult>("read_blueprint_graph_summary", {
       path,
       graphName: name,
+      withPositions: true,
     });
-    reports.push(reviewGraph(name, summary.nodes ?? [], { isInterface, delegateNames }));
+    reports.push(reviewGraph(name, summary.nodes ?? [], { isInterface, delegateNames, parentClass: state.parentClass }));
     allNodes.push(...(summary.nodes ?? []));
     // How big each graph is, so an EMPTY RepNotify can be told from a full one. Recorded for every
     // graph rather than only the handlers, because which names are handlers is not known until the
