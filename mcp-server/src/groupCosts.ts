@@ -17,10 +17,10 @@ export const GROUP_COST_TOKENS: Record<string, number> = {
   cine: 299,
   cpp: 841,
   data: 6098,
-  edit: 6018,
+  edit: 6279,
   epic: 373,
   input: 1307,
-  maintenance: 5777,
+  maintenance: 5922,
   materials: 2283,
   runtime: 3709,
   scene: 5631,
@@ -29,7 +29,7 @@ export const GROUP_COST_TOKENS: Record<string, number> = {
 };
 
 /** Everything enabled at once, for the rare job that genuinely needs the whole surface. */
-export const ALL_GROUPS_TOKENS = 49567;
+export const ALL_GROUPS_TOKENS = 49973;
 
 /** Naming the eight tools one Blueprint feature needs, instead of enabling the `core` group. */
 export const FEATURE_SET_TOKENS = 5292;

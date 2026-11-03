@@ -708,6 +708,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_review_layout",
     "unreal_tidy_layout",
     "unreal_set_variable_replication",
+    "unreal_set_event_replication",
   ],
   ui: ["unreal_scaffold_widget", "unreal_create_widget_blueprint", "unreal_add_widget", "unreal_list_widgets", "unreal_set_widget_property"],
   materials: [
@@ -761,7 +762,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
   ],
   // trace_variable sits with find_references because they are the same question asked of different
   // things - "where is this used" - and a caller reaching for one usually wants the other.
-  maintenance: ["unreal_undo", "unreal_document_asset", "unreal_asset_status", "unreal_find_references", "unreal_trace_variable", "unreal_trace_function_calls", "unreal_set_variable_type", "unreal_create_asset", "unreal_delete_asset", "unreal_rename_asset", "unreal_duplicate_asset", "unreal_rename_variable", "unreal_rename_function", "unreal_remove_variable", "unreal_rename_component", "unreal_remove_component", "unreal_remove_function", "unreal_refresh_blueprint"],
+  maintenance: ["unreal_undo", "unreal_document_asset", "unreal_asset_status", "unreal_find_references", "unreal_trace_variable", "unreal_trace_function_calls", "unreal_set_variable_type", "unreal_create_asset", "unreal_delete_asset", "unreal_rename_asset", "unreal_duplicate_asset", "unreal_rename_variable", "unreal_rename_function", "unreal_remove_variable", "unreal_rename_component", "unreal_remove_component", "unreal_remove_function", "unreal_refresh_blueprint", "unreal_restart_editor"],
   // Only compile_cpp. find_source stays in `core`, and the reason is worth writing down because the
   // obvious tidy-up is wrong: enabling "core" enables CORE_PROFILE_TOOLS, not this table's `core`
   // entry, and find_source is in that set. Moving it here would have changed what unreal_list_tools
@@ -2188,6 +2189,50 @@ register(
 );
 
 register(
+  "unreal_restart_editor",
+  {
+    title: "Restart or quit the editor without dialogs",
+    description:
+      "Restarts or quits the editor with no Save Content dialog, which would otherwise block the bridge until a person " +
+      'clicks. unsaved "report" (default) refuses and lists unsaved assets; "save" saves them; "discard" drops them.',
+    inputSchema: {
+      mode: z.enum(["restart", "quit"]),
+      unsaved: z.enum(["report", "save", "discard"]).optional(),
+    },
+  },
+  async ({ mode, unsaved }) => {
+    try {
+      return jsonResult(await bridge.send("restart_editor", { mode, unsaved }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_set_event_replication",
+  {
+    title: "Change an existing custom event's replication",
+    description:
+      "The event details' Replicates dropdown, for an EXISTING custom event (unreal_add_node's netMode covers new ones). " +
+      "Compile and save after.",
+    inputSchema: {
+      path: z.string().describe("Blueprint path."),
+      eventName: z.string().describe("Custom event name."),
+      mode: z.enum(["none", "server", "multicast", "client"]),
+      reliable: z.boolean().optional().describe("For state changes, not cosmetics. Default false."),
+    },
+  },
+  async ({ path, eventName, mode, reliable }) => {
+    try {
+      return jsonResult(await bridge.send("set_event_replication", { path, eventName, mode, reliable }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
   "unreal_compile_blueprint",
   {
     title: "Compile a Blueprint and report errors/warnings",
@@ -3260,6 +3305,7 @@ register(
       "what is inside it - drag the box and those nodes move. So never let two boxes half-overlap: nest one fully " +
       "inside the other, or separate them.\n" +
       '  - "move_node": nodeId + x/y. Repositions a node.\n' +
+      '  - "edit_comment_box": nodeId + text and/or color. Retitle or recolour in place.\n' +
       "**Match the graph you are in** - unreal_review_layout with `pathPrefix` measures a project's own conventions, " +
       "so you need not invent any. Typical: a box holds ~7 nodes, its title is a two-word NAME rather than a " +
       "sentence (`Movement`, `Aim Server`), caps are rare, and a big system nests - an outer box naming it, inner " +
@@ -3267,8 +3313,8 @@ register(
     inputSchema: {
       path: z.string().describe('Blueprint path; /Game/UI/BP_Foo and /Game/UI/BP_Foo.BP_Foo both work.'),
       graphName: z.string().describe("Graph to organize."),
-      action: z.enum(["set_node_comment", "add_comment_box", "move_node", "resize_comment_box"]),
-      nodeId: z.string().optional().describe("Required for set_node_comment, move_node and resize_comment_box."),
+      action: z.enum(["set_node_comment", "add_comment_box", "move_node", "resize_comment_box", "edit_comment_box"]),
+      nodeId: z.string().optional().describe("Required for set_node_comment, move_node, resize_comment_box and edit_comment_box."),
       comment: z.string().optional().describe("set_node_comment: the comment text (empty string clears it)."),
       text: z
         .string()
@@ -3278,9 +3324,13 @@ register(
       y: z.number().optional().describe("Position Y (add_comment_box, move_node)."),
       width: z.number().optional().describe("add_comment_box: box width. Defaults to 400."),
       height: z.number().optional().describe("add_comment_box: box height. Defaults to 300."),
+      color: z
+        .object({ r: z.number(), g: z.number(), b: z.number(), a: z.number().optional() })
+        .optional()
+        .describe("Box colour, 0-1 per channel."),
     },
   },
-  async ({ path, graphName, action, nodeId, comment, text, x, y, width, height }) => {
+  async ({ path, graphName, action, nodeId, comment, text, x, y, width, height, color }) => {
     try {
       const result = await bridge.send<OrganizeGraphResult>("organize_graph", {
         path,
@@ -3293,6 +3343,7 @@ register(
         y,
         width,
         height,
+        color,
       });
       return jsonResult(result);
     } catch (err) {

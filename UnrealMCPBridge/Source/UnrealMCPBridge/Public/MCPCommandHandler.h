@@ -47,6 +47,8 @@ private:
 	static TSharedRef<FJsonObject> HandleRemoveNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleAddVariable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleSetVariableReplication(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleSetEventReplication(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleRestartEditor(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleWatchRuntime(const TSharedPtr<FJsonObject>& Params);
 
 	/** Level Sequences, in MCPSequence.cpp: what a cutscene animates, and how one silently does nothing. */

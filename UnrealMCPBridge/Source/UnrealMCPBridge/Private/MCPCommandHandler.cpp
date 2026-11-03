@@ -79,6 +79,7 @@
 #include "Engine/SCS_Node.h"
 #include "InputCoreTypes.h"
 #include "FileHelpers.h"
+#include "UnrealEdMisc.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
@@ -1051,6 +1052,7 @@ static bool IsPathDestructiveCommand(const FString& Cmd)
 		TEXT("create_material_instance"), TEXT("create_function"), TEXT("add_node"),
 		TEXT("connect_pins"), TEXT("set_pin_default_value"), TEXT("remove_node"),
 		TEXT("add_variable"), TEXT("build_graph"), TEXT("organize_graph"), TEXT("save_blueprint"),
+		TEXT("set_event_replication"),
 		TEXT("delete_asset"), TEXT("refresh_blueprint"), TEXT("add_component"),
 		TEXT("set_component_property"), TEXT("set_class_default"), TEXT("add_widget"),
 		TEXT("set_widget_property"), TEXT("add_struct_field"), TEXT("set_material_parameter"),
@@ -1297,6 +1299,14 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	else if (Cmd == TEXT("set_variable_replication"))
 	{
 		Response = HandleSetVariableReplication(Params);
+	}
+	else if (Cmd == TEXT("set_event_replication"))
+	{
+		Response = HandleSetEventReplication(Params);
+	}
+	else if (Cmd == TEXT("restart_editor"))
+	{
+		Response = HandleRestartEditor(Params);
 	}
 	else if (Cmd == TEXT("compile_blueprint"))
 	{
@@ -1966,6 +1976,7 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleReadBlueprintGraphSummary(cons
 			// that explains them. Without this, "does this system have a titled box?" is
 			// unanswerable, and so is "what systems does this Blueprint contain?"
 			NodeEntry->SetStringField(TEXT("text"), Node->NodeComment);
+			NodeEntry->SetStringField(TEXT("color"), CommentNode->CommentColor.ToFColor(true).ToHex());
 
 			// Which nodes the box BELIEVES it holds, which is not always which nodes sit inside it.
 			//
@@ -4869,6 +4880,231 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateFunction(const TSharedPt
 	return MakeOkResponse(Result);
 }
 
+/**
+ * Reads an optional comment box colour, given as {"r","g","b","a"} in 0-1. Alpha defaults to 1.
+ * Colour is how a team tells systems apart at a glance (networking one colour, UI another), and
+ * without it every box an agent drew came out the same default white.
+ */
+static bool ReadCommentColor(const TSharedPtr<FJsonObject>& Params, FLinearColor& OutColor)
+{
+	const TSharedPtr<FJsonObject>* ColorObject = nullptr;
+	if (!Params.IsValid() || !Params->TryGetObjectField(TEXT("color"), ColorObject) || !ColorObject || !ColorObject->IsValid())
+	{
+		return false;
+	}
+	double R = 1.0, G = 1.0, B = 1.0, A = 1.0;
+	(*ColorObject)->TryGetNumberField(TEXT("r"), R);
+	(*ColorObject)->TryGetNumberField(TEXT("g"), G);
+	(*ColorObject)->TryGetNumberField(TEXT("b"), B);
+	(*ColorObject)->TryGetNumberField(TEXT("a"), A);
+	OutColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
+	return true;
+}
+
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetEventReplication(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path, EventName, Mode;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) ||
+		!Params->TryGetStringField(TEXT("eventName"), EventName) ||
+		!Params->TryGetStringField(TEXT("mode"), Mode))
+	{
+		return MakeErrorResponse(
+			TEXT("missing_param: path, eventName and mode are required. mode is \"none\", \"server\", \"multicast\" or \"client\"."));
+	}
+
+	const FString Wanted = Mode.ToLower();
+	if (Wanted != TEXT("none") && Wanted != TEXT("server") && Wanted != TEXT("multicast") && Wanted != TEXT("client"))
+	{
+		return MakeErrorResponse(FString::Printf(
+			TEXT("bad_param: mode \"%s\" is not one of \"none\", \"server\", \"multicast\", \"client\"."), *Mode));
+	}
+	bool bReliable = false;
+	Params->TryGetBoolField(TEXT("reliable"), bReliable);
+
+	FString LoadError;
+	UBlueprint* Blueprint = LoadBlueprintByPath(Path, LoadError);
+	if (!Blueprint)
+	{
+		return MakeErrorResponse(LoadError);
+	}
+
+	// Custom events live in any ubergraph page, not only EventGraph, so every graph is searched.
+	UK2Node_CustomEvent* EventNode = nullptr;
+	TArray<FString> EventNames;
+	TArray<UEdGraph*> AllGraphs;
+	Blueprint->GetAllGraphs(AllGraphs);
+	for (UEdGraph* Graph : AllGraphs)
+	{
+		if (!Graph)
+		{
+			continue;
+		}
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (UK2Node_CustomEvent* Candidate = Cast<UK2Node_CustomEvent>(Node))
+			{
+				if (Candidate->CustomFunctionName.ToString().Equals(EventName, ESearchCase::IgnoreCase))
+				{
+					EventNode = Candidate;
+				}
+				else if (EventNames.Num() < 20)
+				{
+					EventNames.Add(Candidate->CustomFunctionName.ToString());
+				}
+			}
+		}
+	}
+	if (!EventNode)
+	{
+		return MakeErrorResponse(FString::Printf(
+			TEXT("event_not_found: %s has no custom event \"%s\". It has: %s"),
+			*Blueprint->GetName(), *EventName,
+			EventNames.Num() > 0 ? *FString::Join(EventNames, TEXT(", ")) : TEXT("(no custom events)")));
+	}
+
+	const uint32 NetMask = FUNC_Net | FUNC_NetServer | FUNC_NetMulticast | FUNC_NetClient | FUNC_NetReliable;
+	const uint32 OldFlags = EventNode->FunctionFlags;
+	uint32 NewFlags = OldFlags & ~NetMask;
+	if (Wanted == TEXT("server"))
+	{
+		NewFlags |= FUNC_Net | FUNC_NetServer;
+	}
+	else if (Wanted == TEXT("multicast"))
+	{
+		NewFlags |= FUNC_Net | FUNC_NetMulticast;
+	}
+	else if (Wanted == TEXT("client"))
+	{
+		NewFlags |= FUNC_Net | FUNC_NetClient;
+	}
+	// Reliable means nothing on an event that does not replicate, so it is only kept with a net mode.
+	if (bReliable && Wanted != TEXT("none"))
+	{
+		NewFlags |= FUNC_NetReliable;
+	}
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("event"), EventNode->CustomFunctionName.ToString());
+	Result->SetStringField(TEXT("mode"), Wanted);
+	Result->SetBoolField(TEXT("reliable"), (NewFlags & FUNC_NetReliable) != 0);
+	if (NewFlags == OldFlags)
+	{
+		Result->SetBoolField(TEXT("changed"), false);
+		Result->SetStringField(TEXT("note"), TEXT("Already set this way. Nothing was written."));
+		return MakeOkResponse(Result);
+	}
+
+	const FScopedTransaction Transaction(
+		NSLOCTEXT("UnrealMCPBridge", "MCPSetEventReplication", "MCP: Set Event Replication"));
+	EventNode->Modify();
+	EventNode->FunctionFlags = NewFlags;
+	// The event's signature is part of the generated class, so callers must recompile against it.
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	Result->SetBoolField(TEXT("changed"), true);
+	Result->SetStringField(TEXT("note"), TEXT("Compile and save the Blueprint to keep it."));
+	return MakeOkResponse(Result);
+}
+
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleRestartEditor(const TSharedPtr<FJsonObject>& Params)
+{
+	// Closing the editor any other way opens the Save Content dialog when anything is dirty, and a
+	// modal dialog blocks this bridge's game-thread ticker, so an agent that asked for a restart
+	// could only wait for a human to click. Deciding about unsaved work up front removes the dialog.
+	FString Mode;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("mode"), Mode))
+	{
+		return MakeErrorResponse(TEXT("missing_param: mode is required: \"restart\" or \"quit\"."));
+	}
+	Mode = Mode.ToLower();
+	if (Mode != TEXT("restart") && Mode != TEXT("quit"))
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("bad_param: mode \"%s\" is not \"restart\" or \"quit\"."), *Mode));
+	}
+	FString Unsaved = TEXT("report");
+	Params->TryGetStringField(TEXT("unsaved"), Unsaved);
+	Unsaved = Unsaved.ToLower();
+	if (Unsaved != TEXT("report") && Unsaved != TEXT("save") && Unsaved != TEXT("discard"))
+	{
+		return MakeErrorResponse(FString::Printf(
+			TEXT("bad_param: unsaved \"%s\" is not \"report\", \"save\" or \"discard\"."), *Unsaved));
+	}
+
+	TArray<UPackage*> Dirty;
+	FEditorFileUtils::GetDirtyWorldPackages(Dirty);
+	FEditorFileUtils::GetDirtyContentPackages(Dirty);
+	TArray<TSharedPtr<FJsonValue>> DirtyNames;
+	for (const UPackage* Package : Dirty)
+	{
+		if (Package)
+		{
+			DirtyNames.Add(MakeShared<FJsonValueString>(Package->GetName()));
+		}
+	}
+
+	if (DirtyNames.Num() > 0 && Unsaved == TEXT("report"))
+	{
+		// Refusing is the default so an unattended restart never throws away work by accident.
+		TArray<FString> Names;
+		for (const TSharedPtr<FJsonValue>& Name : DirtyNames)
+		{
+			Names.Add(Name->AsString());
+		}
+		return MakeErrorResponse(FString::Printf(
+			TEXT("unsaved_work: nothing was closed. Unsaved: %s. Call again with unsaved \"save\" to keep them or \"discard\" to drop them."),
+			*FString::Join(Names, TEXT(", "))));
+	}
+
+	if (GEditor && GEditor->PlayWorld)
+	{
+		GEditor->RequestEndPlayMap();
+	}
+	if (DirtyNames.Num() > 0)
+	{
+		if (Unsaved == TEXT("save"))
+		{
+			if (!FEditorFileUtils::SaveDirtyPackages(/*bPromptUserToSave=*/false, /*bSaveMapPackages=*/true, /*bSaveContentPackages=*/true))
+			{
+				return MakeErrorResponse(TEXT("save_failed: some unsaved packages could not be saved, so the editor was left open."));
+			}
+		}
+		else
+		{
+			for (UPackage* Package : Dirty)
+			{
+				if (Package)
+				{
+					Package->SetDirtyFlag(false);
+				}
+			}
+		}
+	}
+
+	// Deferred so this reply reaches the client before the editor starts shutting down.
+	const bool bRestart = Mode == TEXT("restart");
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([bRestart](float) -> bool
+	{
+		if (bRestart)
+		{
+			FUnrealEdMisc::Get().RestartEditor(/*bWarn=*/false);
+		}
+		else
+		{
+			RequestEngineExit(TEXT("UnrealMCPBridge quit_editor"));
+		}
+		return false;
+	}), 0.5f);
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("mode"), Mode);
+	Result->SetStringField(TEXT("unsaved"), Unsaved);
+	Result->SetArrayField(TEXT("handled"), DirtyNames);
+	Result->SetStringField(TEXT("note"), bRestart
+		? TEXT("Restarting. The bridge is unreachable until the editor finishes loading again.")
+		: TEXT("Quitting. The bridge is gone until someone opens the editor again."));
+	return MakeOkResponse(Result);
+}
+
 TSharedRef<FJsonObject> FMCPCommandHandler::HandleOrganizeGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Path, GraphName, Action;
@@ -4950,11 +5186,63 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleOrganizeGraph(const TSharedPtr
 		// text. Setting it earlier silently wiped the caller's text on every box; found
 		// by the owner playtesting and noticing the boxes carried no information.
 		CommentNode->NodeComment = Text;
+		FLinearColor BoxColor;
+		if (ReadCommentColor(Params, BoxColor))
+		{
+			CommentNode->CommentColor = BoxColor;
+		}
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetStringField(TEXT("id"), MakeNodeId(CommentNode));
 		Result->SetStringField(TEXT("text"), Text);
+		return MakeOkResponse(Result);
+	}
+
+	if (Action == TEXT("edit_comment_box"))
+	{
+		// Retitling or recolouring a box in place keeps the nodes it holds. Deleting and redrawing
+		// it would not: a new box only learns what it holds the next time it is moved.
+		FString NodeId;
+		if (!Params->TryGetStringField(TEXT("nodeId"), NodeId))
+		{
+			return MakeErrorResponse(TEXT("missing_param: nodeId is required for edit_comment_box"));
+		}
+		FString NodeError;
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId, NodeError);
+		if (!Node)
+		{
+			return MakeErrorResponse(NodeError);
+		}
+		UEdGraphNode_Comment* CommentNode = Cast<UEdGraphNode_Comment>(Node);
+		if (!CommentNode)
+		{
+			return MakeErrorResponse(TEXT("not_a_comment_box: edit_comment_box only works on a comment box node"));
+		}
+		FString Text;
+		const bool bHasText = Params->TryGetStringField(TEXT("text"), Text);
+		FLinearColor BoxColor;
+		const bool bHasColor = ReadCommentColor(Params, BoxColor);
+		if (!bHasText && !bHasColor)
+		{
+			return MakeErrorResponse(TEXT("missing_param: edit_comment_box needs text, color, or both"));
+		}
+
+		const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPEditCommentBox", "MCP: Edit Comment Box"));
+		CommentNode->Modify();
+		if (bHasText)
+		{
+			CommentNode->NodeComment = Text;
+		}
+		if (bHasColor)
+		{
+			CommentNode->CommentColor = BoxColor;
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("id"), MakeNodeId(CommentNode));
+		Result->SetStringField(TEXT("text"), CommentNode->NodeComment);
 		return MakeOkResponse(Result);
 	}
 
