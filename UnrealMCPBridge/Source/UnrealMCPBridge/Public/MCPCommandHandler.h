@@ -48,6 +48,9 @@ private:
 	static TSharedRef<FJsonObject> HandleAddVariable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleSetVariableReplication(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleSetEventReplication(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleImplementInterface(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleRebuildBrush(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleFindPath(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleRestartEditor(const TSharedPtr<FJsonObject>& Params);
 	/** In MCPPerfSnapshot.cpp: frame times, every-frame tickers and bandwidth of a running game. */
 	static TSharedRef<FJsonObject> HandlePerfSnapshot(const TSharedPtr<FJsonObject>& Params);

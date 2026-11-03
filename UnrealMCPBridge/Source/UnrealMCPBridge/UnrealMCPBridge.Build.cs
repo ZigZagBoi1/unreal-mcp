@@ -45,6 +45,8 @@ public class UnrealMCPBridge : ModuleRules
 			// For reading Behavior Trees. AIModule is runtime, not editor: a Behavior Tree is a
 			// cooked asset, and reading one needs no editor machinery at all.
 			"AIModule",
+			// For find_path: asking the navmesh whether an AI can get from A to B, in the world it runs in.
+			"NavigationSystem",
 			// For reading Niagara systems: emitters and the user parameters a Blueprint may set.
 			"Niagara",
 			"SourceControl",

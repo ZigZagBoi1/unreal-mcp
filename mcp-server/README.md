@@ -233,9 +233,9 @@ table cannot quietly go stale the way the standing instructions did.
 |---|---:|---|
 | `search` | 2535 | five tools; hand it a sentence or a preset name |
 | `minimal` | 4260 | ten tools, fixed, for a small local model |
-| `core` | 13283 | the authoring spine |
-| `lazy` | 13590 | `core` plus deferred groups |
-| `full` | 51213 | everything, for a model that can afford it |
+| `core` | 13282 | the authoring spine |
+| `lazy` | 13589 | `core` plus deferred groups |
+| `full` | 51721 | everything, for a model that can afford it |
 <!-- costs:end -->
 
 The three flagship journeys — a bug, a feature and a change, each run from the sentence a person
@@ -274,6 +274,7 @@ graph -> drill into one node, instead of ever dumping a whole Blueprint's raw en
 | `unreal_perf_snapshot` | `perf_snapshot` | During PIE: frame/game/render/GPU ms, the classes ticking every frame, and bytes per second per client. |
 | `unreal_restart_editor` | `restart_editor` | Restart or quit the editor with no Save Content dialog: report, save or discard unsaved assets first. |
 | `unreal_set_event_replication` | `set_event_replication` | Set an existing custom event to `none` / `server` / `multicast` / `client`, optionally reliable. |
+| `unreal_implement_interface` | `implement_interface` | Add (or `remove`) a Blueprint or native interface; says which members are events and which got function graphs, and refuses a duplicate a parent already has. |
 | `unreal_watch_runtime` | `watch_runtime` | Sample variables on live actors during PIE, in every world, labelled by net role. |
 | `unreal_run_console_command` | `run_console_command` | Run a console line - `ce`, `Ke`, cheats, cvars, `stat` - in the running game or the editor. |
 | `unreal_compile_blueprint` | `compile_blueprint` | Compile and return structured errors/warnings. **Run this after every batch of edits** (see below). |
@@ -403,6 +404,8 @@ give it a body, configure its class defaults, bind input to it, and actually run
 | `unreal_create_level` | `create_level` | Create a Level (World) asset, optionally with a GameMode override. |
 | `unreal_open_level` | `open_level` | Load a Level into the editor world. Every actor tool acts on the currently open level. |
 | `unreal_spawn_actor` | `spawn_actor` | Place an actor with a transform and label; `StaticMeshActor` + `staticMesh` blocks out geometry in one call. |
+| `unreal_find_path` | `find_path` | Path between two points in the editor or the running server world, with the reason when there is none (no nav data, no tiles, an end off the mesh, no route). |
+| `unreal_rebuild_brush` | `rebuild_brush` | Regenerate a volume's shape from its brush builder. A volume spawned from code has empty bounds, so a NavMeshBoundsVolume covers nothing until this runs. |
 | `unreal_list_actors` | `list_actors` | Read the open level: every actor's label, class, location, and the Blueprint behind it, plus a per-class census. |
 | `unreal_set_actor_property` | `set_actor_property` | Override a property on one placed instance, without touching the Blueprint it came from. |
 | `unreal_delete_actor` | `delete_actor` | Remove one placed actor from the open level. |

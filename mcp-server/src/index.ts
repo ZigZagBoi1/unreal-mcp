@@ -686,6 +686,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_read_runtime_errors",
     "unreal_screenshot",
     "unreal_perf_snapshot",
+    "unreal_find_path",
     // Beside read_runtime_errors because it works the same way - run something, read what the
     // editor wrote to Saved/Logs - and answers the same question one level up: not "what went wrong
     // when I pressed Play" but "does the engine still think this project is correct".
@@ -711,6 +712,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_tidy_layout",
     "unreal_set_variable_replication",
     "unreal_set_event_replication",
+    "unreal_implement_interface",
   ],
   ui: ["unreal_scaffold_widget", "unreal_create_widget_blueprint", "unreal_add_widget", "unreal_list_widgets", "unreal_set_widget_property"],
   materials: [
@@ -748,6 +750,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_create_level",
     "unreal_open_level",
     "unreal_spawn_actor",
+    "unreal_rebuild_brush",
     "unreal_list_actors",
     "unreal_set_actor_property",
     "unreal_delete_actor",
@@ -2256,6 +2259,28 @@ register(
 );
 
 register(
+  "unreal_find_path",
+  {
+    title: "Can an AI walk from here to there",
+    description:
+      "Asks the navmesh for a path between two points, in the editor world or the running game's server world. " +
+      "Says which of the usual causes it is when there is none: no nav data, no tiles, an end off the mesh, or no route.",
+    inputSchema: {
+      from: z.string().describe("\"x,y,z\"."),
+      to: z.string().describe("\"x,y,z\"."),
+      world: z.enum(["editor", "pie"]).optional().describe("Default editor. pie asks the server world of a running game."),
+    },
+  },
+  async ({ from, to, world }) => {
+    try {
+      return jsonResult(await bridge.send("find_path", { from, to, world }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
   "unreal_restart_editor",
   {
     title: "Restart or quit the editor without dialogs",
@@ -2293,6 +2318,48 @@ register(
   async ({ path, eventName, mode, reliable }) => {
     try {
       return jsonResult(await bridge.send("set_event_replication", { path, eventName, mode, reliable }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_implement_interface",
+  {
+    title: "Add or remove an interface on a Blueprint",
+    description:
+      "Class Settings > Implemented Interfaces. Returns which interface members are events and which got function graphs. " +
+      "An interface a parent already has is reported, not added twice. Compile and save after.",
+    inputSchema: {
+      path: z.string().describe("Blueprint path."),
+      interface: z.string().describe("Blueprint Interface asset path, or a native interface class path (/Script/Module.Name)."),
+      remove: z.boolean().optional().describe("Remove it instead. Its function graphs are kept as plain functions."),
+    },
+  },
+  async ({ path, interface: iface, remove }) => {
+    try {
+      return jsonResult(await bridge.send("implement_interface", { path, interface: iface, remove }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_rebuild_brush",
+  {
+    title: "Regenerate a volume's shape from its brush builder",
+    description:
+      "For a volume or brush whose bounds are empty because it was spawned from code (the editor only builds the shape when a person places it). " +
+      "Reports polys and bounds before and after. A NavMeshBoundsVolume then needs RebuildNavigation, and the level saved.",
+    inputSchema: {
+      actor: z.string().describe("Label or name of the volume or brush in the open level."),
+    },
+  },
+  async ({ actor }) => {
+    try {
+      return jsonResult(await bridge.send("rebuild_brush", { actor }));
     } catch (err) {
       return errorResult(err);
     }

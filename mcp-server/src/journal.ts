@@ -79,6 +79,7 @@ const READ_ONLY_COMMANDS = new Set([
   "get_game_settings",
   "pie_status",
   "perf_snapshot",
+  "find_path",
   "asset_status",
   "project_health",
   "undo_history",

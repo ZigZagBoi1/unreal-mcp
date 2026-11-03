@@ -77,6 +77,15 @@
 #include "Editor.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
+#include "Engine/InheritableComponentHandler.h"
+#include "Engine/Brush.h"
+#include "Engine/BrushBuilder.h"
+#include "Engine/Polys.h"
+#include "Model.h"
+#include "Components/BrushComponent.h"
+#include "NavigationSystem.h"
+#include "NavigationPath.h"
+#include "NavMesh/RecastNavMesh.h"
 #include "InputCoreTypes.h"
 #include "FileHelpers.h"
 #include "UnrealEdMisc.h"
@@ -1052,7 +1061,7 @@ static bool IsPathDestructiveCommand(const FString& Cmd)
 		TEXT("create_material_instance"), TEXT("create_function"), TEXT("add_node"),
 		TEXT("connect_pins"), TEXT("set_pin_default_value"), TEXT("remove_node"),
 		TEXT("add_variable"), TEXT("build_graph"), TEXT("organize_graph"), TEXT("save_blueprint"),
-		TEXT("set_event_replication"),
+		TEXT("set_event_replication"), TEXT("implement_interface"),
 		TEXT("delete_asset"), TEXT("refresh_blueprint"), TEXT("add_component"),
 		TEXT("set_component_property"), TEXT("set_class_default"), TEXT("add_widget"),
 		TEXT("set_widget_property"), TEXT("add_struct_field"), TEXT("set_material_parameter"),
@@ -1303,6 +1312,18 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	else if (Cmd == TEXT("set_event_replication"))
 	{
 		Response = HandleSetEventReplication(Params);
+	}
+	else if (Cmd == TEXT("implement_interface"))
+	{
+		Response = HandleImplementInterface(Params);
+	}
+	else if (Cmd == TEXT("rebuild_brush"))
+	{
+		Response = HandleRebuildBrush(Params);
+	}
+	else if (Cmd == TEXT("find_path"))
+	{
+		Response = HandleFindPath(Params);
 	}
 	else if (Cmd == TEXT("restart_editor"))
 	{
@@ -5010,6 +5031,289 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetEventReplication(const TSha
 	return MakeOkResponse(Result);
 }
 
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleImplementInterface(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path, InterfacePath;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) ||
+		!Params->TryGetStringField(TEXT("interface"), InterfacePath))
+	{
+		return MakeErrorResponse(
+			TEXT("missing_param: path and interface are required. interface is a Blueprint Interface asset path or a native interface class path."));
+	}
+	bool bRemove = false;
+	Params->TryGetBoolField(TEXT("remove"), bRemove);
+
+	FString LoadError;
+	UBlueprint* Blueprint = LoadBlueprintByPath(Path, LoadError);
+	if (!Blueprint)
+	{
+		return MakeErrorResponse(LoadError);
+	}
+
+	// A Blueprint Interface is an asset whose generated class is the interface; a native one is a class path.
+	UClass* InterfaceClass = nullptr;
+	if (UBlueprint* InterfaceBlueprint = LoadObject<UBlueprint>(nullptr, *InterfacePath))
+	{
+		InterfaceClass = InterfaceBlueprint->GeneratedClass;
+	}
+	if (!InterfaceClass)
+	{
+		InterfaceClass = LoadObject<UClass>(nullptr, *InterfacePath);
+	}
+	if (!InterfaceClass || !InterfaceClass->HasAnyClassFlags(CLASS_Interface))
+	{
+		return MakeErrorResponse(FString::Printf(
+			TEXT("interface_not_found: \"%s\" is not an interface. Pass the Blueprint Interface asset path (e.g. /Game/Interfaces/BPI_Thing) or a native class path (/Script/Module.ClassName)."),
+			*InterfacePath));
+	}
+
+	const FTopLevelAssetPath InterfaceName = InterfaceClass->GetClassPathName();
+	const bool bAlready = Blueprint->ImplementedInterfaces.ContainsByPredicate(
+		[InterfaceClass](const FBPInterfaceDescription& Desc) { return Desc.Interface == InterfaceClass; });
+
+	// An interface a parent already implements must not be added again: the child inherits it, and
+	// a second copy makes duplicate graphs that fail to compile.
+	bool bInherited = false;
+	for (UClass* Parent = Blueprint->ParentClass; Parent; Parent = Parent->GetSuperClass())
+	{
+		if (Parent->ImplementsInterface(InterfaceClass))
+		{
+			bInherited = true;
+			break;
+		}
+	}
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("interface"), InterfaceName.ToString());
+
+	if (!bRemove && bInherited)
+	{
+		Result->SetBoolField(TEXT("changed"), false);
+		Result->SetStringField(TEXT("note"), TEXT("A parent class already implements this interface, so this Blueprint has it. Override its events here instead."));
+		return MakeOkResponse(Result);
+	}
+	if (bRemove != bAlready)
+	{
+		Result->SetBoolField(TEXT("changed"), false);
+		Result->SetStringField(TEXT("note"), bRemove ? TEXT("This Blueprint does not implement it. Nothing was written.") : TEXT("Already implemented. Nothing was written."));
+		return MakeOkResponse(Result);
+	}
+
+	const FScopedTransaction Transaction(
+		NSLOCTEXT("UnrealMCPBridge", "MCPImplementInterface", "MCP: Implement Interface"));
+	Blueprint->Modify();
+	if (bRemove)
+	{
+		// Keep the function graphs as plain functions, the same as answering "keep" in the editor.
+		FBlueprintEditorUtils::RemoveInterface(Blueprint, InterfaceName, /*bPreserveFunctions=*/true);
+	}
+	else if (!FBlueprintEditorUtils::ImplementNewInterface(Blueprint, InterfaceName))
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("implement_failed: the engine refused to add %s to %s."), *InterfaceName.ToString(), *Blueprint->GetName()));
+	}
+
+	// Functions with outputs get their own graph; the rest are events placed from the event graph.
+	TArray<TSharedPtr<FJsonValue>> Events, Functions;
+	for (TFieldIterator<UFunction> It(InterfaceClass, EFieldIteratorFlags::ExcludeSuper); It; ++It)
+	{
+		const FString Name = It->GetName();
+		if (Name.StartsWith(TEXT("ExecuteUbergraph")))
+		{
+			continue;
+		}
+		(UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(*It) ? Events : Functions).Add(MakeShared<FJsonValueString>(Name));
+	}
+	Result->SetBoolField(TEXT("changed"), true);
+	Result->SetBoolField(TEXT("removed"), bRemove);
+	if (!bRemove)
+	{
+		Result->SetArrayField(TEXT("events"), Events);
+		Result->SetArrayField(TEXT("functionGraphs"), Functions);
+	}
+	Result->SetStringField(TEXT("note"), bRemove
+		? TEXT("Removed. Its function graphs were kept as ordinary functions. Compile and save.")
+		: TEXT("Implemented. Place the events in the event graph; functions with outputs got their own graphs. Compile and save."));
+	return MakeOkResponse(Result);
+}
+
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleRebuildBrush(const TSharedPtr<FJsonObject>& Params)
+{
+	// A volume spawned from code gets a BrushBuilder but no geometry: the editor only runs the builder
+	// when a person drags the volume in. Its bounds are then empty, so a NavMeshBoundsVolume covers
+	// nothing, the navmesh builds in milliseconds with no tiles, and every AI MoveTo fails silently.
+	FString ActorName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("actor"), ActorName))
+	{
+		return MakeErrorResponse(TEXT("missing_param: actor (label or name of a volume or brush in the open level)"));
+	}
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		return MakeErrorResponse(TEXT("no_editor_world: open a level first (open_level)"));
+	}
+
+	ABrush* Brush = nullptr;
+	for (TActorIterator<ABrush> It(World); It; ++It)
+	{
+		if (It->GetActorLabel() == ActorName || It->GetName() == ActorName)
+		{
+			Brush = *It;
+			break;
+		}
+	}
+	if (!Brush)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("brush_not_found: no volume or brush labelled or named \"%s\" in %s"), *ActorName, *World->GetName()));
+	}
+	if (!Brush->BrushBuilder)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("no_brush_builder: %s has no builder to rebuild from. Only volumes and brushes made with a shape builder can be rebuilt."), *Brush->GetActorLabel()));
+	}
+
+	auto CountPolys = [](const ABrush* B) -> int32
+	{
+		return (B->Brush && B->Brush->Polys) ? B->Brush->Polys->Element.Num() : 0;
+	};
+	const int32 PolysBefore = CountPolys(Brush);
+	const FBox BoundsBefore = Brush->GetComponentsBoundingBox(true);
+
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPRebuildBrush", "MCP: Rebuild Brush"));
+	Brush->Modify();
+	if (!Brush->Brush)
+	{
+		Brush->Brush = NewObject<UModel>(Brush, NAME_None, RF_Transactional);
+		Brush->Brush->Initialize(Brush, /*InOwnsPolys=*/true);
+	}
+	if (!Brush->BrushBuilder->Build(World, Brush))
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("build_failed: %s's %s refused to build."), *Brush->GetActorLabel(), *Brush->BrushBuilder->GetClass()->GetName()));
+	}
+	if (UBrushComponent* Component = Brush->GetBrushComponent())
+	{
+		Component->Brush = Brush->Brush;
+		Component->RequestUpdateBrushCollision();
+	}
+	Brush->ReregisterAllComponents();
+	// PostEditChange is what tells navigation that a bounds volume moved, so it rebuilds over the new area.
+	Brush->PostEditChange();
+
+	const FBox BoundsAfter = Brush->GetComponentsBoundingBox(true);
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("actor"), Brush->GetActorLabel());
+	Result->SetStringField(TEXT("class"), Brush->GetClass()->GetName());
+	Result->SetNumberField(TEXT("polysBefore"), PolysBefore);
+	Result->SetNumberField(TEXT("polysAfter"), CountPolys(Brush));
+	Result->SetStringField(TEXT("boundsBefore"), BoundsBefore.IsValid ? BoundsBefore.GetSize().ToString() : TEXT("empty"));
+	Result->SetStringField(TEXT("boundsAfter"), BoundsAfter.IsValid ? BoundsAfter.GetSize().ToString() : TEXT("empty"));
+	Result->SetStringField(TEXT("note"), TEXT("Save the level to keep it. A NavMeshBoundsVolume also needs the navmesh rebuilt (run_console_command RebuildNavigation)."));
+	return MakeOkResponse(Result);
+}
+
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleFindPath(const TSharedPtr<FJsonObject>& Params)
+{
+	// "The AI stands still" has four different causes - no navmesh at all, a navmesh with no tiles,
+	// a point off the mesh, or no route between two islands - and from outside they look identical.
+	// This answers which one, in the world the AI actually runs in.
+	FString FromStr, ToStr, WorldName = TEXT("editor");
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("from"), FromStr) || !Params->TryGetStringField(TEXT("to"), ToStr))
+	{
+		return MakeErrorResponse(TEXT("missing_param: from and to are required, each \"x,y,z\". world is \"editor\" (default) or \"pie\" (the server's world)."));
+	}
+	Params->TryGetStringField(TEXT("world"), WorldName);
+
+	auto ParseVector = [](const FString& In, FVector& Out) -> bool
+	{
+		TArray<FString> Parts;
+		In.ParseIntoArray(Parts, TEXT(","), true);
+		if (Parts.Num() != 3)
+		{
+			return false;
+		}
+		Out = FVector(FCString::Atod(*Parts[0]), FCString::Atod(*Parts[1]), FCString::Atod(*Parts[2]));
+		return true;
+	};
+	FVector From, To;
+	if (!ParseVector(FromStr, From) || !ParseVector(ToStr, To))
+	{
+		return MakeErrorResponse(TEXT("bad_param: from and to must each be \"x,y,z\"."));
+	}
+
+	UWorld* World = nullptr;
+	if (WorldName.Equals(TEXT("pie"), ESearchCase::IgnoreCase))
+	{
+		// Clients have no navigation data unless the project allows it, so the server's world is the one to ask.
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::PIE && Context.World() && Context.World()->GetNetMode() != NM_Client)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+		if (!World)
+		{
+			return MakeErrorResponse(TEXT("no_pie_world: Play In Editor is not running (start_pie first)."));
+		}
+	}
+	else
+	{
+		World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	}
+	if (!World)
+	{
+		return MakeErrorResponse(TEXT("no_world: open a level first (open_level)"));
+	}
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("world"), World->GetName());
+	UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!Nav)
+	{
+		Result->SetBoolField(TEXT("pathFound"), false);
+		Result->SetStringField(TEXT("why"), TEXT("This world has no navigation system."));
+		return MakeOkResponse(Result);
+	}
+	ANavigationData* NavData = Nav->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
+	if (!NavData)
+	{
+		Result->SetBoolField(TEXT("pathFound"), false);
+		Result->SetStringField(TEXT("why"), TEXT("No navigation data in this world. Add a NavMeshBoundsVolume, or check RuntimeGeneration."));
+		return MakeOkResponse(Result);
+	}
+	Result->SetStringField(TEXT("navData"), NavData->GetName());
+	if (const ARecastNavMesh* Recast = Cast<ARecastNavMesh>(NavData))
+	{
+		Result->SetNumberField(TEXT("tiles"), Recast->GetNavMeshTilesCount());
+		Result->SetStringField(TEXT("runtimeGeneration"), StaticEnum<ERuntimeGenerationType>()->GetNameStringByValue(static_cast<int64>(Recast->GetRuntimeGenerationMode())));
+	}
+
+	const FVector Extent(100.0, 100.0, 300.0);
+	FNavLocation FromOnNav, ToOnNav;
+	const bool bFromOnNav = Nav->ProjectPointToNavigation(From, FromOnNav, Extent, NavData);
+	const bool bToOnNav = Nav->ProjectPointToNavigation(To, ToOnNav, Extent, NavData);
+	Result->SetBoolField(TEXT("fromOnNavmesh"), bFromOnNav);
+	Result->SetBoolField(TEXT("toOnNavmesh"), bToOnNav);
+
+	UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(World, From, To);
+	const bool bValid = Path && Path->IsValid();
+	Result->SetBoolField(TEXT("pathFound"), bValid);
+	if (bValid)
+	{
+		Result->SetBoolField(TEXT("partial"), Path->IsPartial());
+		Result->SetNumberField(TEXT("length"), FMath::RoundToInt(Path->GetPathLength()));
+		Result->SetNumberField(TEXT("points"), Path->PathPoints.Num());
+	}
+	else
+	{
+		Result->SetStringField(TEXT("why"),
+			Result->HasField(TEXT("tiles")) && Result->GetNumberField(TEXT("tiles")) == 0 ? TEXT("The navmesh has no tiles: nothing inside the bounds is walkable, or it was never built and saved (Static generation keeps only what was saved).") :
+			!bFromOnNav || !bToOnNav ? TEXT("An end point is not on the navmesh.") :
+			TEXT("Both ends are on the navmesh but nothing connects them."));
+	}
+	return MakeOkResponse(Result);
+}
+
 TSharedRef<FJsonObject> FMCPCommandHandler::HandleRestartEditor(const TSharedPtr<FJsonObject>& Params)
 {
 	// Closing the editor any other way opens the Save Content dialog when anything is dirty, and a
@@ -8156,7 +8460,74 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetComponentProperty(const TSh
 			TargetNode = Node;
 		}
 	}
-	if (!TargetNode || !TargetNode->ComponentTemplate)
+
+	// A child Blueprint edits what it inherits in two different places, and the details panel hides
+	// the difference. A component a parent BLUEPRINT added is overridden through the inheritable
+	// component handler; a component the native class creates (a Character's mesh, capsule and
+	// movement) lives on the class default object. Without both, "set the enemy's mesh" had no answer.
+	UActorComponent* Template = TargetNode ? TargetNode->ComponentTemplate.Get() : nullptr;
+	FString Where = TEXT("own");
+	if (!Template)
+	{
+		for (UBlueprint* Parent = Cast<UBlueprint>(Blueprint->ParentClass ? Blueprint->ParentClass->ClassGeneratedBy : nullptr);
+			Parent && !Template; Parent = Cast<UBlueprint>(Parent->ParentClass ? Parent->ParentClass->ClassGeneratedBy : nullptr))
+		{
+			if (!Parent->SimpleConstructionScript)
+			{
+				continue;
+			}
+			for (USCS_Node* Node : Parent->SimpleConstructionScript->GetAllNodes())
+			{
+				if (!Node)
+				{
+					continue;
+				}
+				Available.AddUnique(Node->GetVariableName().ToString());
+				if (Node->GetVariableName() == FName(*ComponentName))
+				{
+					if (UInheritableComponentHandler* Handler = Blueprint->GetInheritableComponentHandler(true))
+					{
+						const FComponentKey Key(Node);
+						Template = Handler->GetOverridenComponentTemplate(Key);
+						if (!Template)
+						{
+							Blueprint->Modify();
+							Template = Handler->CreateOverridenComponentTemplate(Key);
+						}
+						Where = TEXT("inherited from ") + Parent->GetName();
+					}
+					break;
+				}
+			}
+		}
+	}
+	if (!Template && Blueprint->GeneratedClass)
+	{
+		// Native components, by object name (CharacterMesh0) or by the property that holds them (Mesh).
+		AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject());
+		if (CDO)
+		{
+			for (TFieldIterator<FObjectProperty> It(CDO->GetClass()); It && !Template; ++It)
+			{
+				if (!It->PropertyClass || !It->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+				{
+					continue;
+				}
+				UActorComponent* Candidate = Cast<UActorComponent>(It->GetObjectPropertyValue_InContainer(CDO));
+				if (!Candidate || Candidate->GetOuter() != CDO)
+				{
+					continue;
+				}
+				Available.AddUnique(It->GetName());
+				if (It->GetName() == ComponentName || Candidate->GetName() == ComponentName)
+				{
+					Template = Candidate;
+					Where = TEXT("native");
+				}
+			}
+		}
+	}
+	if (!Template)
 	{
 		return MakeErrorResponse(FString::Printf(TEXT("component_not_found: %s (available: %s)"),
 			*ComponentName, *FString::Join(Available, TEXT(", "))));
@@ -8164,8 +8535,17 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetComponentProperty(const TSh
 
 	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPSetComponentProp", "MCP: Set Component Property"));
 	Blueprint->Modify();
+	Template->Modify();
 	TSharedRef<FJsonObject> Response = SetPropertyFromString(
-		TargetNode->ComponentTemplate, PropertyName, Value, &MakeOkResponse, &MakeErrorResponse);
+		Template, PropertyName, Value, &MakeOkResponse, &MakeErrorResponse);
+	if (Response->HasField(TEXT("result")))
+	{
+		const TSharedPtr<FJsonObject>* ResultObj = nullptr;
+		if (Response->TryGetObjectField(TEXT("result"), ResultObj))
+		{
+			(*ResultObj)->SetStringField(TEXT("component"), Where);
+		}
+	}
 	if (Response->GetBoolField(TEXT("ok")))
 	{
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
