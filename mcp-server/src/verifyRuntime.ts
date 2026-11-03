@@ -66,6 +66,73 @@ function looksUnset(raw: string): boolean {
   return value === "" || value === "None" || value === '""';
 }
 
+/**
+ * A pass/fail line for a sampled value.
+ *
+ * "Did energy move" was answerable; "did one second of holding fire cost at most 24 energy" was not,
+ * so a fire rate that was double the intended one read as working. Bounds are checked against every
+ * value the watch saw, not only the ends: a value that dips while a key is held and recovers after
+ * looks untouched at `first` and `last`.
+ */
+export interface RuntimeExpectation {
+  watch: string;
+  /** Only this role, e.g. "Authority". Omit to require it of every role that sampled the value. */
+  role?: string;
+  /** Every sampled value must be at least this. */
+  min?: number;
+  /** Every sampled value must be at most this. */
+  max?: number;
+  /** true: the value must change at some point. false: it must never change. */
+  changes?: boolean;
+}
+
+export interface ExpectationResult {
+  watch: string;
+  role: string;
+  pass: boolean;
+  detail: string;
+}
+
+/** Every value a row saw, as numbers where they parse. The bridge joins distinct values with " -> ". */
+function observedNumbers(row: RuntimeSample & { values?: unknown }): number[] {
+  const raw: string[] = [String(row.first ?? ""), String(row.last ?? "")];
+  if (Array.isArray(row.values)) raw.push(...row.values.map(String));
+  else if (typeof row.values === "string") raw.push(...row.values.split(" -> "));
+  // A multi-actor sample reads "80 | 82.5" once the names are stripped: every actor's value counts.
+  return raw
+    .flatMap((v) => valuesOnly(v).split(" | "))
+    .map((v) => Number(v.trim()))
+    .filter((n) => Number.isFinite(n));
+}
+
+export function checkExpectations(watched: RuntimeSample[], expectations: RuntimeExpectation[]): ExpectationResult[] {
+  const results: ExpectationResult[] = [];
+  for (const expect of expectations) {
+    const rows = watched.filter((row) => row.watch === expect.watch && (!expect.role || row.role === expect.role));
+    if (rows.length === 0) {
+      results.push({ watch: expect.watch, role: expect.role ?? "any", pass: false, detail: "never sampled - check the class and property name" });
+      continue;
+    }
+    for (const row of rows) {
+      const seen = observedNumbers(row);
+      const low = seen.length > 0 ? Math.min(...seen) : undefined;
+      const high = seen.length > 0 ? Math.max(...seen) : undefined;
+      const problems: string[] = [];
+      if (expect.min !== undefined && (low === undefined || low < expect.min)) problems.push(`went down to ${low ?? "a non-number"}, expected at least ${expect.min}`);
+      if (expect.max !== undefined && (high === undefined || high > expect.max)) problems.push(`went up to ${high ?? "a non-number"}, expected at most ${expect.max}`);
+      if (expect.changes === true && row.changed !== true) problems.push("never changed");
+      if (expect.changes === false && row.changed === true) problems.push("changed");
+      results.push({
+        watch: expect.watch,
+        role: row.role,
+        pass: problems.length === 0,
+        detail: problems.length > 0 ? problems.join("; ") : `ok (range ${low ?? "?"} to ${high ?? "?"})`,
+      });
+    }
+  }
+  return results;
+}
+
 /** Roles collapse to one line per watched value, because that is the question being asked. */
 export function summariseRuntime(watched: RuntimeSample[], pressed?: string): RuntimeVerdict {
   const byWatch = new Map<string, RuntimeSample[]>();

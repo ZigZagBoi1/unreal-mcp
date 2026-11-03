@@ -7,7 +7,7 @@ import { dedupeFixes } from "./dedupeFixes.js";
 import { stripSchemaDeclaration } from "./trimSchemaDeclaration.js";
 import { trimFloatPaddingIn, trimFloatPadding } from "./trimFloats.js";
 import { dedupeRepeatedStructs, MARKER_PATTERN } from "./dedupeStructs.js";
-import { summariseRuntime } from "./verifyRuntime.js";
+import { summariseRuntime, checkExpectations } from "./verifyRuntime.js";
 import { walkChain, describeGates } from "./inputChain.js";
 import { normaliseEngineType, normaliseFieldTypes, typeHint } from "./engineTypes.js";
 import { findInDataTables } from "./findInDataTables.js";
@@ -6501,35 +6501,80 @@ register(
             "moves while an ability is in use will read as unchanged - which is exactly how a fix gets " +
             "reported as working when it is not."
         ),
+      expect: z
+        .array(
+          z.object({
+            watch: z.string(),
+            role: z.string().optional(),
+            min: z.number().optional(),
+            max: z.number().optional(),
+            changes: z.boolean().optional(),
+          })
+        )
+        .optional()
+        .describe('Pass/fail checks over every sampled value, e.g. {watch:"BP_Player.Energy", min:76} for "1 s of fire costs at most 24".'),
+      screenshot: z.boolean().optional().describe("Return a frame captured mid-run."),
+      runs: z.number().optional().describe("Repeat with a fresh PIE session, up to 5, to catch random state. Default 1."),
     },
   },
-  async ({ watch, seconds, press }) => {
+  async ({ watch, seconds, press, expect, screenshot, runs }) => {
     try {
       const runFor = Math.max(3, Math.min(120, seconds ?? 20));
       const before = (await bridge.send("pie_status", {})) as { running?: boolean };
       const startedItHere = before.running !== true;
-      if (startedItHere) {
-        await bridge.send("start_pie", {});
-        // PIE begins on the next editor tick and a big map takes longer than that to be worth
-        // sampling. Waiting here rather than making the caller guess.
-        await new Promise((resolve) => setTimeout(resolve, 12_000));
-      }
-      await bridge.send("watch_runtime", { action: "start", watch, intervalMs: 500, maxSamples: 200 });
-      // Sampling starts before the press, so the reply contains the value both before and during -
-      // which is what makes "changed" mean anything.
-      if (press) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        await bridge
-          .send("press_input", { inputAction: press.inputAction, seconds: press.seconds ?? 5, world: press.world })
-          .catch(() => {});
-      }
-      await new Promise((resolve) => setTimeout(resolve, runFor * 1000));
-      const sampled = (await bridge.send("watch_runtime", { action: "read" })) as { watched?: unknown[] };
-      await bridge.send("watch_runtime", { action: "stop" }).catch(() => {});
-      if (startedItHere) await bridge.send("stop_pie", {}).catch(() => {});
+      // Repeats only make sense when each run gets its own session; an open session is left alone.
+      const runCount = startedItHere ? Math.max(1, Math.min(5, Math.round(runs ?? 1))) : 1;
+      const images: string[] = [];
+      const perRun: Array<{ run: number; checks?: ReturnType<typeof checkExpectations>; runtimeErrors?: unknown }> = [];
+      let rows: never[] = [];
+      for (let run = 1; run <= runCount; run++) {
+        if (startedItHere) {
+          await bridge.send("start_pie", {});
+          // PIE begins on the next editor tick and a big map takes longer than that to be worth
+          // sampling. Waiting here rather than making the caller guess.
+          await new Promise((resolve) => setTimeout(resolve, 12_000));
+        }
+        await bridge.send("watch_runtime", { action: "start", watch, intervalMs: 250, maxSamples: 400 });
+        // Sampling starts before the press, so the reply contains the value both before and during -
+        // which is what makes "changed" mean anything.
+        if (press) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await bridge
+            .send("press_input", { inputAction: press.inputAction, seconds: press.seconds ?? 5, world: press.world })
+            .catch(() => {});
+        }
+        // The frame is taken a second into the run (or the hold), when there is something to see.
+        if (screenshot && images.length < 3) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          try {
+            const shot = await bridge.send<{ path: string }>("take_screenshot", { maxLongEdge: 960 });
+            images.push(readFileSync(shot.path).toString("base64"));
+          } catch {
+            /* a missing frame must not fail the measurement */
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, runFor * 1000));
+        const sampled = (await bridge.send("watch_runtime", { action: "read" })) as { watched?: unknown[] };
+        await bridge.send("watch_runtime", { action: "stop" }).catch(() => {});
+        if (startedItHere) await bridge.send("stop_pie", {}).catch(() => {});
+        rows = Array.isArray(sampled.watched) ? (sampled.watched as never[]) : [];
 
-      const rows = Array.isArray(sampled.watched) ? (sampled.watched as never[]) : [];
+        // What the editor logged during this session, so a run that "passed" while spamming
+        // Accessed None does not read as clean. Only for a session this call owned: an open one has
+        // no boundary to read up to.
+        let runtimeErrors: unknown;
+        if (startedItHere) {
+          try {
+            const ping = await bridge.send<PingResult & { projectFile?: string }>("ping");
+            if (ping.projectFile) runtimeErrors = await readRuntimeLogForProject(ping.projectFile, { limit: 8 });
+          } catch {
+            /* the log is a bonus; the samples are the measurement */
+          }
+        }
+        perRun.push({ run, ...(expect ? { checks: checkExpectations(rows, expect) } : {}), ...(runtimeErrors ? { runtimeErrors } : {}) });
+      }
       const summary = summariseRuntime(rows, press?.inputAction);
+      const failedChecks = perRun.flatMap((r) => (r.checks ?? []).filter((c) => !c.pass).map((c) => ({ run: r.run, ...c })));
 
       // If a press moved nothing, say WHERE it stopped instead of shrugging.
       //
@@ -6630,13 +6675,18 @@ register(
         }
       }
 
-      return jsonResult({
+      const result = jsonResult({
         ranForSeconds: runFor,
         startedPie: startedItHere,
+        ...(runCount > 1 ? { runs: runCount } : {}),
         ...(press ? { pressed: press.inputAction } : {}),
+        ...(expect ? { passed: failedChecks.length === 0, failedChecks } : {}),
         ...summary,
+        ...(perRun.some((r) => r.checks || r.runtimeErrors) ? { perRun } : {}),
         ...(gateNote ? { whyNothingHappened: gateNote } : {}),
       });
+      for (const data of images) result.content.push({ type: "image" as const, data, mimeType: "image/png" } as never);
+      return result;
     } catch (err) {
       return errorResult(err);
     }
