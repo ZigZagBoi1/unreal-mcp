@@ -1308,6 +1308,10 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	{
 		Response = HandleRestartEditor(Params);
 	}
+	else if (Cmd == TEXT("perf_snapshot"))
+	{
+		Response = HandlePerfSnapshot(Params);
+	}
 	else if (Cmd == TEXT("compile_blueprint"))
 	{
 		Response = HandleCompileBlueprint(Params);

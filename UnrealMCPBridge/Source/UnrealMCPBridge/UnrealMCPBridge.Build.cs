@@ -19,6 +19,9 @@ public class UnrealMCPBridge : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			// Frame-time globals (GGameThreadTime, GRenderThreadTime, RHIGetGPUFrameCycles) for perf_snapshot.
+			"RenderCore",
+			"RHI",
 			"Slate",
 			"SlateCore",
 			"UnrealEd",

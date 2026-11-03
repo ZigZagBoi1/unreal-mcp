@@ -58,7 +58,8 @@ import { guardWithAuthority } from "./authorityGuard.js";
 import { RepeatGuard } from "./repeatGuard.js";
 import { reviewStatePlacement } from "./statePlacement.js";
 import { allPolicies, resolveMode, DEFAULT_MODE } from "./mode.js";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { diffGraph } from "./diffGraph.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { findSourceRoots, searchSource, modulesByName, matchesByFile } from "./nativeSource.js";
@@ -684,6 +685,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_teleport_actor",
     "unreal_read_runtime_errors",
     "unreal_screenshot",
+    "unreal_perf_snapshot",
     // Beside read_runtime_errors because it works the same way - run something, read what the
     // editor wrote to Saved/Logs - and answers the same question one level up: not "what went wrong
     // when I pressed Play" but "does the engine still think this project is correct".
@@ -762,7 +764,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
   ],
   // trace_variable sits with find_references because they are the same question asked of different
   // things - "where is this used" - and a caller reaching for one usually wants the other.
-  maintenance: ["unreal_undo", "unreal_document_asset", "unreal_asset_status", "unreal_find_references", "unreal_trace_variable", "unreal_trace_function_calls", "unreal_set_variable_type", "unreal_create_asset", "unreal_delete_asset", "unreal_rename_asset", "unreal_duplicate_asset", "unreal_rename_variable", "unreal_rename_function", "unreal_remove_variable", "unreal_rename_component", "unreal_remove_component", "unreal_remove_function", "unreal_refresh_blueprint", "unreal_restart_editor"],
+  maintenance: ["unreal_undo", "unreal_document_asset", "unreal_asset_status", "unreal_find_references", "unreal_trace_variable", "unreal_trace_function_calls", "unreal_set_variable_type", "unreal_create_asset", "unreal_delete_asset", "unreal_rename_asset", "unreal_duplicate_asset", "unreal_rename_variable", "unreal_rename_function", "unreal_remove_variable", "unreal_rename_component", "unreal_remove_component", "unreal_remove_function", "unreal_refresh_blueprint", "unreal_restart_editor", "unreal_diff_graph"],
   // Only compile_cpp. find_source stays in `core`, and the reason is worth writing down because the
   // obvious tidy-up is wrong: enabling "core" enables CORE_PROFILE_TOOLS, not this table's `core`
   // entry, and find_source is in that set. Moving it here would have changed what unreal_list_tools
@@ -2182,6 +2184,71 @@ register(
   async ({ path, variableName, mode }) => {
     try {
       return jsonResult(await bridge.send("set_variable_replication", { path, variableName, mode }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_diff_graph",
+  {
+    title: "What changed in a graph between two versions",
+    description:
+      "Compares a graph with the same graph in an older copy of the Blueprint (a .uasset on disk: a backup, or one " +
+      "restored from version control): nodes added, removed and moved, and comment boxes retitled, recoloured or " +
+      "resized. Positions are the point - a hand cleanup changes layout, which a text read cannot see.",
+    inputSchema: {
+      path: z.string().describe("Blueprint path as it is now."),
+      graphName: z.string().describe("Graph to compare."),
+      beforeFile: z.string().describe("Disk path of the older .uasset of the same Blueprint."),
+    },
+  },
+  async ({ path, graphName, beforeFile }) => {
+    const name = path.split("/").pop()?.split(".")[0] ?? "";
+    const ping = await bridge.send<PingResult & { projectFile?: string }>("ping").catch(() => null);
+    if (!ping?.projectFile) return errorResult(new Error("no_project_file: the plugin did not report the open project."));
+    // The older copy is loaded under a scratch folder with its ORIGINAL file name, because the object
+    // inside a .uasset keeps the name it was saved with and a renamed file would not resolve.
+    const scratchDir = join(dirname(ping.projectFile), "Content", "__MCPDiff");
+    const scratchAsset = `/Game/__MCPDiff/${name}`;
+    try {
+      mkdirSync(scratchDir, { recursive: true });
+      copyFileSync(beforeFile, join(scratchDir, `${name}.uasset`));
+      const read = (p: string) =>
+        bridge.send<{ nodes?: never[] }>("read_blueprint_graph_summary", { path: p, graphName, withPositions: true, maxNodes: 2000 });
+      let before: { nodes?: never[] } | undefined;
+      // The asset registry notices a new file a moment after it lands.
+      for (let i = 0; i < 10 && !before; i++) {
+        before = await read(scratchAsset).catch(() => undefined);
+        if (!before) await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!before) throw new Error(`could not load ${beforeFile} as ${scratchAsset}; is it a copy of ${name}?`);
+      const after = await read(path);
+      return jsonResult(diffGraph(before.nodes ?? [], after.nodes ?? []));
+    } catch (err) {
+      return errorResult(err);
+    } finally {
+      await bridge.send("delete_asset", { path: scratchAsset, force: true }).catch(() => {});
+      rmSync(scratchDir, { recursive: true, force: true });
+    }
+  }
+);
+
+register(
+  "unreal_perf_snapshot",
+  {
+    title: "What the running game costs",
+    description:
+      "During PIE: frame, game-thread, render and GPU ms, the classes with the most actors ticking every frame, " +
+      "and bytes per second sent to each client. Numbers include the editor, so treat them as an upper bound.",
+    inputSchema: {
+      topClasses: z.number().optional().describe("How many every-frame ticking classes to list. Default 12."),
+    },
+  },
+  async ({ topClasses }) => {
+    try {
+      return jsonResult(await bridge.send("perf_snapshot", { topClasses }));
     } catch (err) {
       return errorResult(err);
     }

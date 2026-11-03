@@ -32,6 +32,7 @@
  * this file exists to prevent.
  */
 export const COMPOSITE_TOOLS = new Set([
+  "diff_graph",
   "review_layout",
   "tidy_layout",
   "trace_input",

@@ -235,7 +235,7 @@ table cannot quietly go stale the way the standing instructions did.
 | `minimal` | 4260 | ten tools, fixed, for a small local model |
 | `core` | 13283 | the authoring spine |
 | `lazy` | 13590 | `core` plus deferred groups |
-| `full` | 50883 | everything, for a model that can afford it |
+| `full` | 51213 | everything, for a model that can afford it |
 <!-- costs:end -->
 
 The three flagship journeys — a bug, a feature and a change, each run from the sentence a person
@@ -270,6 +270,8 @@ graph -> drill into one node, instead of ever dumping a whole Blueprint's raw en
 | `unreal_remove_node` | `remove_node` | Remove a node by id, breaking its links first. |
 | `unreal_add_variable` | `add_variable` | Add a member variable (compact type descriptor: `bool`, `int`, `float`, `vector`, `object:<Class>`, ...). |
 | `unreal_set_variable_replication` | `set_variable_replication` | Set an existing variable to `none` / `replicated` / `repnotify`, creating or reusing its `OnRep_` graph. |
+| `unreal_diff_graph` | (composite) | Compare a graph with an older .uasset of the same Blueprint: nodes added, removed, moved; comment boxes retitled, recoloured, resized. |
+| `unreal_perf_snapshot` | `perf_snapshot` | During PIE: frame/game/render/GPU ms, the classes ticking every frame, and bytes per second per client. |
 | `unreal_restart_editor` | `restart_editor` | Restart or quit the editor with no Save Content dialog: report, save or discard unsaved assets first. |
 | `unreal_set_event_replication` | `set_event_replication` | Set an existing custom event to `none` / `server` / `multicast` / `client`, optionally reliable. |
 | `unreal_watch_runtime` | `watch_runtime` | Sample variables on live actors during PIE, in every world, labelled by net role. |
