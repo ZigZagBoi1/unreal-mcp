@@ -111,6 +111,7 @@ export const FEATURE_PROBE_LIST: Array<{ cmd: string; feature: string }> = [
     { cmd: "implement_interface", feature: "adding an interface to a Blueprint" },
     { cmd: "rebuild_brush", feature: "giving a code-spawned volume its shape" },
     { cmd: "find_path", feature: "asking the navmesh whether an AI can get somewhere" },
+    { cmd: "open_assets", feature: "opening changed assets for a person to review" },
     // Safe to probe: with no `mode` it answers missing_param before it looks at, saves or closes anything.
     { cmd: "restart_editor", feature: "restarting the editor without a Save Content dialog" },
     // Read-only: it reports frame times and tick counts and changes nothing.

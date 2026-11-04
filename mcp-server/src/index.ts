@@ -751,6 +751,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_open_level",
     "unreal_spawn_actor",
     "unreal_rebuild_brush",
+    "unreal_open_assets",
     "unreal_list_actors",
     "unreal_set_actor_property",
     "unreal_delete_actor",
@@ -2259,6 +2260,24 @@ register(
 );
 
 register(
+  "unreal_open_assets",
+  {
+    title: "Open assets in their editors for a person to check",
+    description: "Opens assets in their editor tabs, to hand work to the user for review.",
+    inputSchema: {
+      paths: z.array(z.string()).describe("Asset paths, e.g. /Game/Characters/BP_Hero."),
+    },
+  },
+  async ({ paths }) => {
+    try {
+      return jsonResult(await bridge.send("open_assets", { paths }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
   "unreal_find_path",
   {
     title: "Can an AI walk from here to there",
@@ -3650,12 +3669,13 @@ register(
       path: z.string().describe('Blueprint path; /Game/UI/BP_Foo and /Game/UI/BP_Foo.BP_Foo both work.'),
       componentClass: z.string().describe('Component class, e.g. "StaticMeshComponent", "SphereComponent", "CameraComponent", "SpringArmComponent", "AudioComponent".'),
       name: z.string().describe('Name for the component as it appears in the Components panel, e.g. "PickupCollision".'),
-      parent: z.string().optional().describe("Existing component name to attach under. Defaults to the Blueprint's root component."),
+      parent: z.string().optional().describe("Existing component name to attach under, including native ones like a Character's Mesh. Defaults to the root."),
+      socket: z.string().optional().describe("Socket or bone on the parent to attach to, e.g. \"Spine\"."),
     },
   },
-  async ({ path, componentClass, name, parent }) => {
+  async ({ path, componentClass, name, parent, socket }) => {
     try {
-      const result = await bridge.send("add_component", { path, componentClass, name, parent });
+      const result = await bridge.send("add_component", { path, componentClass, name, parent, socket });
       return jsonResult(result);
     } catch (err) {
       return errorResult(err);
@@ -4819,11 +4839,12 @@ register(
         .array(z.string())
         .optional()
         .describe('Input modifiers, in the short form this server prints: ["Negate"], ["SwizzleAxis", "Negate"]. Common ones are Negate, SwizzleAxis, DeadZone, Scalar, SmoothDelta.'),
+      copyFromKey: z.string().optional().describe("Copy triggers and modifiers from this action's mapping on another key, so a second key behaves the same (e.g. a Hold)."),
     },
   },
-  async ({ path, action, key, modifiers }) => {
+  async ({ path, action, key, modifiers, copyFromKey }) => {
     try {
-      return jsonResult(await bridge.send("map_input_key", { path, action, key, modifiers }));
+      return jsonResult(await bridge.send("map_input_key", { path, action, key, modifiers, copyFromKey }));
     } catch (err) {
       return errorResult(err);
     }

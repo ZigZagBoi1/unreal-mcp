@@ -80,6 +80,8 @@ const READ_ONLY_COMMANDS = new Set([
   "pie_status",
   "perf_snapshot",
   "find_path",
+  // Opens editor tabs for a person to look at; nothing in the project changes.
+  "open_assets",
   "asset_status",
   "project_health",
   "undo_history",

@@ -233,9 +233,9 @@ table cannot quietly go stale the way the standing instructions did.
 |---|---:|---|
 | `search` | 2535 | five tools; hand it a sentence or a preset name |
 | `minimal` | 4260 | ten tools, fixed, for a small local model |
-| `core` | 13282 | the authoring spine |
-| `lazy` | 13589 | `core` plus deferred groups |
-| `full` | 51721 | everything, for a model that can afford it |
+| `core` | 13283 | the authoring spine |
+| `lazy` | 13590 | `core` plus deferred groups |
+| `full` | 51902 | everything, for a model that can afford it |
 <!-- costs:end -->
 
 The three flagship journeys — a bug, a feature and a change, each run from the sentence a person
@@ -405,6 +405,7 @@ give it a body, configure its class defaults, bind input to it, and actually run
 | `unreal_open_level` | `open_level` | Load a Level into the editor world. Every actor tool acts on the currently open level. |
 | `unreal_spawn_actor` | `spawn_actor` | Place an actor with a transform and label; `StaticMeshActor` + `staticMesh` blocks out geometry in one call. |
 | `unreal_find_path` | `find_path` | Path between two points in the editor or the running server world, with the reason when there is none (no nav data, no tiles, an end off the mesh, no route). |
+| `unreal_open_assets` | `open_assets` | Open assets in their editor tabs, to hand changed work to a person for review. |
 | `unreal_rebuild_brush` | `rebuild_brush` | Regenerate a volume's shape from its brush builder. A volume spawned from code has empty bounds, so a NavMeshBoundsVolume covers nothing until this runs. |
 | `unreal_list_actors` | `list_actors` | Read the open level: every actor's label, class, location, and the Blueprint behind it, plus a per-class census. |
 | `unreal_set_actor_property` | `set_actor_property` | Override a property on one placed instance, without touching the Blueprint it came from. |

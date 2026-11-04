@@ -283,6 +283,38 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleMapInputKey(const TSharedPtr<F
 		}
 	}
 
+	// A second key for an action should behave like the first: same Hold time, same Tap window. Copying
+	// the existing mapping's triggers and modifiers is the only way to be sure of that, so it is offered.
+	TArray<FString> Triggers;
+	FString CopyFrom;
+	if (Params->TryGetStringField(TEXT("copyFromKey"), CopyFrom) && !CopyFrom.IsEmpty())
+	{
+		const FKey SourceKey(*CopyFrom);
+		const FEnhancedActionKeyMapping* Source = Context->GetMappings().FindByPredicate(
+			[Action, &SourceKey](const FEnhancedActionKeyMapping& M) { return M.Action == Action && M.Key == SourceKey; });
+		if (!Source)
+		{
+			return NotFound(TEXT("copy_source_not_found"),
+				FString::Printf(TEXT("%s has no %s mapping to copy from. The key was mapped before this failed, so re-read the context."), *Action->GetName(), *CopyFrom));
+		}
+		for (const TObjectPtr<UInputTrigger>& Trigger : Source->Triggers)
+		{
+			if (Trigger)
+			{
+				Mapping.Triggers.Add(DuplicateObject<UInputTrigger>(Trigger, Context));
+				Triggers.Add(ShortBehaviourName(Trigger, TEXT("InputTrigger")));
+			}
+		}
+		for (const TObjectPtr<UInputModifier>& Modifier : Source->Modifiers)
+		{
+			if (Modifier)
+			{
+				Mapping.Modifiers.Add(DuplicateObject<UInputModifier>(Modifier, Context));
+				Applied.Add(ShortBehaviourName(Modifier, TEXT("InputModifier")));
+			}
+		}
+	}
+
 	Context->MarkPackageDirty();
 
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -290,6 +322,10 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleMapInputKey(const TSharedPtr<F
 	Result->SetStringField(TEXT("context"), Context->GetName());
 	Result->SetStringField(TEXT("action"), Action->GetName());
 	Result->SetStringField(TEXT("key"), Key.ToString());
+	if (Triggers.Num() > 0)
+	{
+		Result->SetStringField(TEXT("triggers"), FString::Join(Triggers, TEXT(", ")));
+	}
 	if (Applied.Num() > 0)
 	{
 		Result->SetStringField(TEXT("modifiers"), FString::Join(Applied, TEXT(", ")));

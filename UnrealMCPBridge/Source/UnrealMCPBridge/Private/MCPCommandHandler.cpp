@@ -86,6 +86,7 @@
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
 #include "NavMesh/RecastNavMesh.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "InputCoreTypes.h"
 #include "FileHelpers.h"
 #include "UnrealEdMisc.h"
@@ -1324,6 +1325,10 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	else if (Cmd == TEXT("find_path"))
 	{
 		Response = HandleFindPath(Params);
+	}
+	else if (Cmd == TEXT("open_assets"))
+	{
+		Response = HandleOpenAssets(Params);
 	}
 	else if (Cmd == TEXT("restart_editor"))
 	{
@@ -5314,6 +5319,44 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleFindPath(const TSharedPtr<FJso
 	return MakeOkResponse(Result);
 }
 
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleOpenAssets(const TSharedPtr<FJsonObject>& Params)
+{
+	// Hands work to a person: open what was changed in its editor, so they can check it themselves.
+	const TArray<TSharedPtr<FJsonValue>>* Paths = nullptr;
+	if (!Params.IsValid() || !Params->TryGetArrayField(TEXT("paths"), Paths) || Paths->Num() == 0)
+	{
+		return MakeErrorResponse(TEXT("missing_param: paths, a list of asset paths to open in their editors."));
+	}
+	UAssetEditorSubsystem* Editors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+	if (!Editors)
+	{
+		return MakeErrorResponse(TEXT("no_editor: the asset editor subsystem is not available."));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Opened, Missing;
+	for (const TSharedPtr<FJsonValue>& Value : *Paths)
+	{
+		FString Path = Value.IsValid() ? Value->AsString() : FString();
+		if (!Path.Contains(TEXT(".")))
+		{
+			Path += TEXT(".") + FPackageName::GetShortName(Path);
+		}
+		UObject* Asset = LoadObject<UObject>(nullptr, *Path);
+		if (Asset && Editors->OpenEditorForAsset(Asset))
+		{
+			Opened.Add(MakeShared<FJsonValueString>(Asset->GetPathName()));
+		}
+		else
+		{
+			Missing.Add(MakeShared<FJsonValueString>(Path));
+		}
+	}
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetArrayField(TEXT("opened"), Opened);
+	Result->SetArrayField(TEXT("notOpened"), Missing);
+	return MakeOkResponse(Result);
+}
+
 TSharedRef<FJsonObject> FMCPCommandHandler::HandleRestartEditor(const TSharedPtr<FJsonObject>& Params)
 {
 	// Closing the editor any other way opens the Save Content dialog when anything is dirty, and a
@@ -8062,11 +8105,38 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleAddComponent(const TSharedPtr<
 				break;
 			}
 		}
-		if (!ParentNode)
+		if (ParentNode)
 		{
-			return MakeErrorResponse(FString::Printf(TEXT("parent_component_not_found: %s"), *ParentName));
+			ParentNode->AddChildNode(NewNode);
 		}
-		ParentNode->AddChildNode(NewNode);
+		else
+		{
+			// A native parent - a Character's Mesh, by property or object name - lives on the class
+			// default object, not in the construction script; attaching to it is how anything rides on a skeleton.
+			USceneComponent* NativeParent = nullptr;
+			if (AActor* CDO = Blueprint->GeneratedClass ? Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject()) : nullptr)
+			{
+				for (TFieldIterator<FObjectProperty> It(CDO->GetClass()); It && !NativeParent; ++It)
+				{
+					USceneComponent* Candidate = Cast<USceneComponent>(It->GetObjectPropertyValue_InContainer(CDO));
+					if (Candidate && Candidate->GetOuter() == CDO && (It->GetName() == ParentName || Candidate->GetName() == ParentName))
+					{
+						NativeParent = Candidate;
+					}
+				}
+			}
+			if (!NativeParent)
+			{
+				return MakeErrorResponse(FString::Printf(TEXT("parent_component_not_found: %s"), *ParentName));
+			}
+			NewNode->SetParent(NativeParent);
+			SCS->AddNode(NewNode);
+		}
+		FString Socket;
+		if (Params->TryGetStringField(TEXT("socket"), Socket) && !Socket.IsEmpty())
+		{
+			NewNode->AttachToName = FName(*Socket);
+		}
 	}
 	else
 	{

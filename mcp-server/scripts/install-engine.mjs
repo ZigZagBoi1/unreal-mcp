@@ -68,7 +68,10 @@ await sleep(5000);
 const target = join(engineDir, "Engine", "Plugins", "Marketplace", "UnrealMCPBridge");
 mkdirSync(target, { recursive: true });
 if (!skipBuild) {
-  for (const part of ["Binaries", "Source"]) {
+  // Binaries only. With Source beside them, the open editor's Live Coding treats the plugin as code to
+  // rebuild and pops its build window on the user's screen; a precompiled plugin needs none of it.
+  rmSync(join(target, "Source"), { recursive: true, force: true });
+  for (const part of ["Binaries"]) {
     rmSync(join(target, part), { recursive: true, force: true });
     cpSync(join(packageDir, part), join(target, part), { recursive: true });
   }
