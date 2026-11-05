@@ -1064,7 +1064,7 @@ static bool IsPathDestructiveCommand(const FString& Cmd)
 		TEXT("add_variable"), TEXT("build_graph"), TEXT("organize_graph"), TEXT("save_blueprint"),
 		TEXT("set_event_replication"), TEXT("implement_interface"),
 		TEXT("delete_asset"), TEXT("refresh_blueprint"), TEXT("add_component"),
-		TEXT("set_component_property"), TEXT("set_class_default"), TEXT("add_widget"),
+		TEXT("set_component_property"), TEXT("set_class_default"), TEXT("add_widget"), TEXT("remove_widget"), TEXT("move_widget"),
 		TEXT("set_widget_property"), TEXT("add_struct_field"), TEXT("set_material_parameter"),
 		TEXT("save_asset"), TEXT("read_asset_properties"), TEXT("set_asset_property"),
 		TEXT("read_class_defaults"), TEXT("read_anim_blueprint"), TEXT("read_behavior_tree"), TEXT("read_niagara_system"), TEXT("trace_variable"), TEXT("trace_function_calls"), TEXT("find_broken_names"),
@@ -1625,6 +1625,14 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	else if (Cmd == TEXT("add_widget"))
 	{
 		Response = HandleAddWidget(Params);
+	}
+	else if (Cmd == TEXT("remove_widget"))
+	{
+		Response = HandleRemoveWidget(Params);
+	}
+	else if (Cmd == TEXT("move_widget"))
+	{
+		Response = HandleMoveWidget(Params);
 	}
 	else if (Cmd == TEXT("list_widgets"))
 	{
@@ -10631,6 +10639,139 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleAddWidget(const TSharedPtr<FJs
 	return MakeOkResponse(Result);
 }
 
+/**
+ * remove_widget / move_widget: the other half of editing a widget tree.
+ *
+ * add_widget alone meant a layout could only grow. Rebuilding a HUD to match a reference ended
+ * with the old widgets collapsed and left in place, because nothing could take them out or put
+ * an existing widget (with its variable name, which graphs reference) under a different panel.
+ */
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleRemoveWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path, WidgetName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || !Params->TryGetStringField(TEXT("widget"), WidgetName))
+	{
+		return MakeErrorResponse(TEXT("missing_param: path, widget are required"));
+	}
+	FString LoadError;
+	UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(Path, LoadError);
+	if (!Blueprint)
+	{
+		return MakeErrorResponse(LoadError);
+	}
+	UWidgetTree* Tree = Blueprint->WidgetTree;
+	UWidget* Widget = Tree->FindWidget(FName(*WidgetName));
+	if (!Widget)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("widget_not_found: %s (list them with list_widgets)"), *WidgetName));
+	}
+	if (Widget == Tree->RootWidget)
+	{
+		return MakeErrorResponse(TEXT("cannot_remove_root: the root widget holds everything; remove its children instead"));
+	}
+
+	// Children go with their parent; say which, so nothing disappears unannounced.
+	TArray<FString> Removed;
+	Removed.Add(Widget->GetName());
+	if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
+	{
+		Tree->ForWidgetAndChildren(Panel, [&Removed, Panel](UWidget* Child)
+		{
+			if (Child && Child != Panel)
+			{
+				Removed.Add(Child->GetName());
+			}
+		});
+	}
+
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPRemoveWidget", "MCP: Remove Widget"));
+	Blueprint->Modify();
+	Tree->Modify();
+	Widget->Modify();
+	if (!Tree->RemoveWidget(Widget))
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("remove_failed: %s"), *WidgetName));
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Names;
+	for (const FString& Name : Removed)
+	{
+		Names.Add(MakeShared<FJsonValueString>(Name));
+	}
+	Result->SetArrayField(TEXT("removed"), Names);
+	Result->SetStringField(TEXT("next"), TEXT("Graph nodes that read these widgets now fail to compile: remove them, then compile_blueprint."));
+	return MakeOkResponse(Result);
+}
+
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleMoveWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path, WidgetName, ParentName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || !Params->TryGetStringField(TEXT("widget"), WidgetName)
+		|| !Params->TryGetStringField(TEXT("parent"), ParentName))
+	{
+		return MakeErrorResponse(TEXT("missing_param: path, widget, parent are required (index optional)"));
+	}
+	FString LoadError;
+	UWidgetBlueprint* Blueprint = LoadWidgetBlueprint(Path, LoadError);
+	if (!Blueprint)
+	{
+		return MakeErrorResponse(LoadError);
+	}
+	UWidgetTree* Tree = Blueprint->WidgetTree;
+	UWidget* Widget = Tree->FindWidget(FName(*WidgetName));
+	UPanelWidget* NewParent = Cast<UPanelWidget>(Tree->FindWidget(FName(*ParentName)));
+	if (!Widget)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("widget_not_found: %s"), *WidgetName));
+	}
+	if (!NewParent)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("parent_not_a_panel: %s is missing or cannot hold children"), *ParentName));
+	}
+	for (UWidget* Up = NewParent; Up; Up = Up->GetParent())
+	{
+		if (Up == Widget)
+		{
+			return MakeErrorResponse(TEXT("cycle: the new parent is inside the widget being moved"));
+		}
+	}
+	if (Widget->GetParent() != NewParent && !NewParent->CanAddMoreChildren())
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("parent_full: %s holds a single child already"), *ParentName));
+	}
+
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPMoveWidget", "MCP: Move Widget"));
+	Blueprint->Modify();
+	Tree->Modify();
+	Widget->Modify();
+	NewParent->Modify();
+	if (UPanelWidget* OldParent = Widget->GetParent())
+	{
+		OldParent->Modify();
+	}
+	Widget->RemoveFromParent();
+
+	int32 Index = -1;
+	Params->TryGetNumberField(TEXT("index"), Index);
+	UPanelSlot* Slot = (Index >= 0 && Index <= NewParent->GetChildrenCount())
+		? NewParent->InsertChildAt(Index, Widget)
+		: NewParent->AddChild(Widget);
+	if (!Slot)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("add_child_failed: %s refused %s"), *ParentName, *WidgetName));
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("widget"), Widget->GetName());
+	Result->SetStringField(TEXT("parent"), NewParent->GetName());
+	Result->SetStringField(TEXT("slotClass"), Slot->GetClass()->GetName());
+	Result->SetStringField(TEXT("note"), TEXT("The slot is new, so its layout (position, size, padding) is the panel default: set it with set_widget_property onSlot:true."));
+	return MakeOkResponse(Result);
+}
+
 TSharedRef<FJsonObject> FMCPCommandHandler::HandleListWidgets(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Path;
@@ -12858,13 +12999,52 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetActorProperty(const TShared
 		return MakeErrorResponse(FindError);
 	}
 
+	// Most of what makes a placed actor what it is lives on its components, not the actor: a light's
+	// shadows, a mesh's collision, a decal's size. `component` names one, so "turn on this sun's
+	// shadows" is one call instead of a dead end.
+	FString ComponentName;
+	Params->TryGetStringField(TEXT("component"), ComponentName);
+	UActorComponent* Component = nullptr;
+	if (!ComponentName.IsEmpty())
+	{
+		TArray<FString> Available;
+		for (UActorComponent* Candidate : Actor->GetComponents())
+		{
+			if (!Candidate)
+			{
+				continue;
+			}
+			Available.Add(Candidate->GetName());
+			if (Candidate->GetName().Equals(ComponentName, ESearchCase::IgnoreCase) ||
+				Candidate->GetFName().ToString().Equals(ComponentName + TEXT("0"), ESearchCase::IgnoreCase))
+			{
+				Component = Candidate;
+			}
+		}
+		if (!Component)
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("component_not_found: %s on %s (available: %s)"),
+				*ComponentName, *Actor->GetActorLabel(), *FString::Join(Available, TEXT(", "))));
+		}
+	}
+
 	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPSetActorProp", "MCP: Set Actor Property"));
 	Actor->Modify();
+	if (Component)
+	{
+		Component->Modify();
+	}
 
+	UObject* Target = Component ? static_cast<UObject*>(Component) : static_cast<UObject*>(Actor);
 	TSharedRef<FJsonObject> Response = SetPropertyFromString(
-		Actor, PropertyName, Value, &MakeOkResponse, &MakeErrorResponse);
+		Target, PropertyName, Value, &MakeOkResponse, &MakeErrorResponse);
 	if (Response->GetBoolField(TEXT("ok")))
 	{
+		if (Component)
+		{
+			Component->PostEditChange();
+			Component->MarkRenderStateDirty();
+		}
 		// This is a per-instance override, not a change to the Blueprint. Say so: the difference
 		// between "this one door opens wider" and "every door opens wider" is exactly the thing a
 		// caller gets wrong, and it is invisible in the response otherwise.

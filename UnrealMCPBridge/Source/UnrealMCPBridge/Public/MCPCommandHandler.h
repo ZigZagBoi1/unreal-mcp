@@ -164,6 +164,8 @@ private:
 	static TSharedRef<FJsonObject> HandleSetComponentProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleAddWidget(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleRemoveWidget(const TSharedPtr<FJsonObject>& Params);
+	static TSharedRef<FJsonObject> HandleMoveWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleListWidgets(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleSetWidgetProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedRef<FJsonObject> HandleReadAssetProperties(const TSharedPtr<FJsonObject>& Params);

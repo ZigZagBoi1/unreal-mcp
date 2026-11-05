@@ -714,7 +714,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_set_event_replication",
     "unreal_implement_interface",
   ],
-  ui: ["unreal_scaffold_widget", "unreal_create_widget_blueprint", "unreal_add_widget", "unreal_list_widgets", "unreal_set_widget_property"],
+  ui: ["unreal_scaffold_widget", "unreal_create_widget_blueprint", "unreal_add_widget", "unreal_remove_widget", "unreal_move_widget", "unreal_list_widgets", "unreal_set_widget_property"],
   materials: [
     "unreal_create_material",
     "unreal_build_material_graph",
@@ -5380,6 +5380,52 @@ register(
 );
 
 register(
+  "unreal_remove_widget",
+  {
+    title: "Remove a widget from a Widget Blueprint",
+    description:
+      "Deletes one widget, and everything inside it if it is a panel, from a Widget Blueprint's tree. The response " +
+      "lists every widget removed. Graph nodes that read a removed widget stop compiling, so remove those nodes too, " +
+      "then compile. The root widget cannot be removed.",
+    inputSchema: {
+      path: z.string().describe("Widget Blueprint path."),
+      widget: z.string().describe("Name of the widget to remove (from unreal_list_widgets)."),
+    },
+  },
+  async ({ path, widget }) => {
+    try {
+      return jsonResult(await bridge.send("remove_widget", { path, widget }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_move_widget",
+  {
+    title: "Move a widget under a different panel",
+    description:
+      "Re-parents an existing widget, keeping its name and every graph reference to it, optionally at a child index. " +
+      "Its slot is new, so its layout resets to the new panel's default: set position/size/padding afterwards with " +
+      "unreal_set_widget_property onSlot: true.",
+    inputSchema: {
+      path: z.string().describe("Widget Blueprint path."),
+      widget: z.string().describe("Name of the widget to move."),
+      parent: z.string().describe("Name of the panel to move it under."),
+      index: z.number().int().optional().describe("Child index in the new parent; omitted appends at the end."),
+    },
+  },
+  async ({ path, widget, parent, index }) => {
+    try {
+      return jsonResult(await bridge.send("move_widget", { path, widget, parent, ...(index !== undefined ? { index } : {}) }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
   "unreal_list_widgets",
   {
     title: "Read a Widget Blueprint's widget tree and animations",
@@ -8858,11 +8904,15 @@ register(
       actor: z.string().describe("The actor's World Outliner label, or its internal name. Get exact values from unreal_list_actors."),
       property: z.string().describe('Property name, e.g. "LightColor", "Intensity", "bHidden".'),
       value: engineValue.describe('The value. A number or boolean is accepted and stringified; structured values are spelled the Unreal way: an asset path or "(R=1,G=0,B=0,A=1)".'),
+      component: z
+        .string()
+        .optional()
+        .describe('Set the property on one of the actor\'s components instead, by name (e.g. "LightComponent0" on a DirectionalLight, "StaticMeshComponent0"). A light\'s shadows, a mesh\'s collision and most render settings live on components. A wrong name lists the real ones.'),
     },
   },
-  async ({ actor, property, value }) => {
+  async ({ actor, property, value, component }) => {
     try {
-      const result = await bridge.send("set_actor_property", { actor, property, value });
+      const result = await bridge.send("set_actor_property", { actor, property, value, ...(component ? { component } : {}) });
       return jsonResult(result);
     } catch (err) {
       return errorResult(err);

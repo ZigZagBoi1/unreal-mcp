@@ -822,6 +822,15 @@ TArray<FString> FMCPProjectIndex::GetBlueprintsWithErrors(int32 Max) const
 	{
 		if (Pair.Value.CompileStatus == TEXT("error"))
 		{
+			// The cached status is from the last index pass. A Blueprint fixed and recompiled since
+			// is loaded and knows better: trust its live status, or a fixed widget keeps blocking PIE.
+			if (const UBlueprint* Live = FindObject<UBlueprint>(nullptr, *Pair.Key))
+			{
+				if (Live->Status != BS_Error)
+				{
+					continue;
+				}
+			}
 			Broken.Add(Pair.Value.Name);
 			if (Max > 0 && Broken.Num() >= Max)
 			{
