@@ -1072,7 +1072,7 @@ static bool IsPathDestructiveCommand(const FString& Cmd)
 		TEXT("create_material_instance"), TEXT("create_function"), TEXT("add_node"),
 		TEXT("connect_pins"), TEXT("set_pin_default_value"), TEXT("remove_node"),
 		TEXT("add_variable"), TEXT("build_graph"), TEXT("organize_graph"), TEXT("save_blueprint"),
-		TEXT("set_event_replication"), TEXT("implement_interface"),
+		TEXT("set_event_replication"), TEXT("implement_interface"), TEXT("set_variable_flags"),
 		TEXT("delete_asset"), TEXT("refresh_blueprint"), TEXT("add_component"),
 		TEXT("set_component_property"), TEXT("set_class_default"), TEXT("add_widget"), TEXT("remove_widget"), TEXT("move_widget"),
 		TEXT("set_widget_property"), TEXT("add_struct_field"), TEXT("set_material_parameter"),
@@ -1319,6 +1319,10 @@ TSharedRef<FJsonObject> FMCPCommandHandler::Dispatch(const TSharedRef<FJsonObjec
 	else if (Cmd == TEXT("set_variable_replication"))
 	{
 		Response = HandleSetVariableReplication(Params);
+	}
+	else if (Cmd == TEXT("set_variable_flags"))
+	{
+		Response = HandleSetVariableFlags(Params);
 	}
 	else if (Cmd == TEXT("set_event_replication"))
 	{
@@ -2642,9 +2646,26 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 		}
 		UClass* ParentClass = Blueprint->ParentClass;
 		UFunction* EventFunc = ParentClass ? ParentClass->FindFunctionByName(FName(*EventName)) : nullptr;
+		// An event from an interface this Blueprint implements ("Event Vacuumed" from BPI_Vacuumable).
+		// The editor references those against the interface class, not the parent, so a parent-only
+		// lookup made every interface event unbuildable - found implementing a vacuumable pickup.
+		UClass* EventOwner = ParentClass;
 		if (!EventFunc)
 		{
-			return MakeErrorResponse(FString::Printf(TEXT("event_function_not_found: %s on %s"),
+			for (const FBPInterfaceDescription& Implemented : Blueprint->ImplementedInterfaces)
+			{
+				UClass* InterfaceClass = Implemented.Interface.Get();
+				if (UFunction* InterfaceFunc = InterfaceClass ? InterfaceClass->FindFunctionByName(FName(*EventName)) : nullptr)
+				{
+					EventFunc = InterfaceFunc;
+					EventOwner = InterfaceClass;
+					break;
+				}
+			}
+		}
+		if (!EventFunc)
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("event_function_not_found: %s on %s or any interface it implements"),
 				*EventName, ParentClass ? *ParentClass->GetName() : TEXT("(no parent class)")));
 		}
 
@@ -2668,7 +2689,7 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 		}
 
 		UK2Node_Event* EventNode = NewObject<UK2Node_Event>(Graph);
-		EventNode->EventReference.SetExternalMember(FName(*EventName), ParentClass);
+		EventNode->EventReference.SetExternalMember(FName(*EventName), EventOwner);
 		EventNode->bOverrideFunction = true;
 		NewNode = EventNode;
 	}
@@ -4410,6 +4431,56 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleWatchRuntime(const TSharedPtr<
 				 "one never received it."),
 			Changed, Rows.Num(), GMCPWatch.Ticks));
 	}
+	return MakeOkResponse(Result);
+}
+
+/**
+ * The variable Details panel's per-instance checkboxes: Instance Editable (the eye icon) and
+ * Expose on Spawn. Without them a designer cannot pick, say, which power-up a placed pickup grants
+ * from the level - every placed copy is stuck with the class default.
+ */
+TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetVariableFlags(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Path, VariableName;
+	if (!Params.IsValid() || !Params->TryGetStringField(TEXT("path"), Path) || !Params->TryGetStringField(TEXT("variableName"), VariableName))
+	{
+		return MakeErrorResponse(TEXT("missing_param: path and variableName are required"));
+	}
+	FString LoadError;
+	UBlueprint* Blueprint = LoadBlueprintByPath(Path, LoadError);
+	if (!Blueprint)
+	{
+		return MakeErrorResponse(LoadError);
+	}
+	const FName VarFName(*VariableName);
+	if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, VarFName) == INDEX_NONE)
+	{
+		return MakeErrorResponse(FString::Printf(TEXT("variable_not_found: %s is not declared by this Blueprint (inherited ones are set where they are declared)"), *VariableName));
+	}
+	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPSetVariableFlags", "MCP: Set Variable Flags"));
+	Blueprint->Modify();
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("variable"), VariableName);
+	bool bValue = false;
+	if (Params->TryGetBoolField(TEXT("instanceEditable"), bValue))
+	{
+		FBlueprintEditorUtils::SetBlueprintOnlyEditableFlag(Blueprint, VarFName, !bValue);
+		Result->SetBoolField(TEXT("instanceEditable"), bValue);
+	}
+	if (Params->TryGetBoolField(TEXT("exposeOnSpawn"), bValue))
+	{
+		if (bValue)
+		{
+			FBlueprintEditorUtils::SetBlueprintVariableMetaData(Blueprint, VarFName, nullptr, FBlueprintMetadata::MD_ExposeOnSpawn, TEXT("true"));
+		}
+		else
+		{
+			FBlueprintEditorUtils::RemoveBlueprintVariableMetaData(Blueprint, VarFName, nullptr, FBlueprintMetadata::MD_ExposeOnSpawn);
+		}
+		Result->SetBoolField(TEXT("exposeOnSpawn"), bValue);
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	Result->SetStringField(TEXT("next"), TEXT("compile_blueprint, then save_blueprint. Placed instances pick up the change after a compile."));
 	return MakeOkResponse(Result);
 }
 

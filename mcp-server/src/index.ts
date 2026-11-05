@@ -711,6 +711,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
     "unreal_review_layout",
     "unreal_tidy_layout",
     "unreal_set_variable_replication",
+    "unreal_set_variable_flags",
     "unreal_set_event_replication",
     "unreal_implement_interface",
   ],
@@ -2215,6 +2216,30 @@ register(
   async ({ path, variableName, mode }) => {
     try {
       return jsonResult(await bridge.send("set_variable_replication", { path, variableName, mode }));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+register(
+  "unreal_set_variable_flags",
+  {
+    title: "Instance Editable / Expose on Spawn",
+    description:
+      "Sets the variable Details panel's per-instance checkboxes. instanceEditable (the eye icon) lets a designer " +
+      "change the value on each placed copy in the level - which power-up a pickup gives, which row a spawner reads. " +
+      "exposeOnSpawn puts it on the Spawn Actor node. Only variables this Blueprint declares.",
+    inputSchema: {
+      path: z.string().describe('Blueprint path; /Game/UI/BP_Foo and /Game/UI/BP_Foo.BP_Foo both work.'),
+      variableName: z.string().describe("Variable to change."),
+      instanceEditable: z.boolean().optional().describe("Editable per placed instance in the level."),
+      exposeOnSpawn: z.boolean().optional().describe("Shown as an input on Spawn Actor."),
+    },
+  },
+  async ({ path, variableName, instanceEditable, exposeOnSpawn }) => {
+    try {
+      return jsonResult(await bridge.send("set_variable_flags", { path, variableName, instanceEditable, exposeOnSpawn }));
     } catch (err) {
       return errorResult(err);
     }
