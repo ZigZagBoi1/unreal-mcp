@@ -64,6 +64,16 @@
 #include "InputAction.h"
 #include "K2Node_InputAxisEvent.h"
 #include "K2Node_Self.h"
+#include "K2Node_MakeStruct.h"
+#include "K2Node_BreakStruct.h"
+#include "K2Node_SwitchEnum.h"
+#include "K2Node_EnumEquality.h"
+#include "K2Node_Select.h"
+#include "K2Node_CallDelegate.h"
+#include "K2Node_AddDelegate.h"
+#include "K2Node_RemoveDelegate.h"
+#include "K2Node_GetDataTableRow.h"
+#include "Engine/DataTable.h"
 #include "EdGraphNode_Comment.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -2940,6 +2950,29 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 				break;
 			}
 		}
+		// A function's LOCAL variable (add_variable with functionName). Checked before inherited
+		// properties so a local shadows nothing by accident, and referenced the way the editor does it:
+		// scoped to the function graph by name, with the local's guid.
+		if (!bFoundVar)
+		{
+			if (FBPVariableDescription* Local = FBlueprintEditorUtils::FindLocalVariable(Blueprint, Graph, VarFName))
+			{
+				const FName Scope = Graph->GetFName();
+				if (NodeType == TEXT("VariableGet"))
+				{
+					UK2Node_VariableGet* GetNode = NewObject<UK2Node_VariableGet>(Graph);
+					GetNode->VariableReference.SetLocalMember(VarFName, Scope.ToString(), Local->VarGuid);
+					NewNode = GetNode;
+				}
+				else
+				{
+					UK2Node_VariableSet* SetNode = NewObject<UK2Node_VariableSet>(Graph);
+					SetNode->VariableReference.SetLocalMember(VarFName, Scope.ToString(), Local->VarGuid);
+					NewNode = SetNode;
+				}
+				bFoundVar = true;
+			}
+		}
 		if (!bFoundVar)
 		{
 			// Not one of the Blueprint's own variables: fall back to inherited/native
@@ -2972,7 +3005,11 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 				*VariableName));
 		}
 
-		if (NodeType == TEXT("VariableGet"))
+		if (NewNode)
+		{
+			// Already made above as a local-variable reference.
+		}
+		else if (NodeType == TEXT("VariableGet"))
 		{
 			UK2Node_VariableGet* GetNode = NewObject<UK2Node_VariableGet>(Graph);
 			GetNode->VariableReference.SetSelfMember(VarFName);
@@ -3149,10 +3186,134 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 		MacroNode->SetMacroGraph(MacroGraph);
 		NewNode = MacroNode;
 	}
+	else if (NodeType == TEXT("MakeStruct") || NodeType == TEXT("BreakStruct"))
+	{
+		// Make / Break a struct. Neither is a CallFunction for a user-defined struct (they are their
+		// own K2Node classes), so without these a Blueprint could hold struct data and never build or
+		// read one. Found building a stat system whose rows, modifiers and replicated values are all
+		// structs. The struct must be set BEFORE AllocateDefaultPins, which builds one pin per field,
+		// and bMadeAfterOverridePinRemoval is what the editor's own spawner sets on a fresh node.
+		FString StructName;
+		if (!Params->TryGetStringField(TEXT("structName"), StructName) || StructName.IsEmpty())
+		{
+			return MakeErrorResponse(FString::Printf(
+				TEXT("missing_param: structName is required for nodeType=%s, e.g. \"S_ItemData\" or \"Vector\""), *NodeType));
+		}
+		FString StructError;
+		UScriptStruct* Struct = ResolveStructByName(StructName, StructError);
+		if (!Struct)
+		{
+			return MakeErrorResponse(StructError);
+		}
+		if (NodeType == TEXT("MakeStruct"))
+		{
+			UK2Node_MakeStruct* MakeNode = NewObject<UK2Node_MakeStruct>(Graph);
+			MakeNode->StructType = Struct;
+			MakeNode->bMadeAfterOverridePinRemoval = true;
+			NewNode = MakeNode;
+		}
+		else
+		{
+			UK2Node_BreakStruct* BreakNode = NewObject<UK2Node_BreakStruct>(Graph);
+			BreakNode->StructType = Struct;
+			BreakNode->bMadeAfterOverridePinRemoval = true;
+			NewNode = BreakNode;
+		}
+	}
+	else if (NodeType == TEXT("SwitchEnum"))
+	{
+		// "Switch on <Enum>": one exec output per entry, named by the entry's display name.
+		FString EnumName;
+		if (!Params->TryGetStringField(TEXT("enumName"), EnumName) || EnumName.IsEmpty())
+		{
+			return MakeErrorResponse(TEXT("missing_param: enumName is required for nodeType=SwitchEnum, e.g. \"E_WeaponType\""));
+		}
+		FString EnumError;
+		UEnum* Enum = ResolveEnumByName(EnumName, EnumError);
+		if (!Enum)
+		{
+			return MakeErrorResponse(EnumError);
+		}
+		UK2Node_SwitchEnum* SwitchNode = NewObject<UK2Node_SwitchEnum>(Graph);
+		SwitchNode->SetEnum(Enum);
+		NewNode = SwitchNode;
+	}
+	else if (NodeType == TEXT("EnumEquality"))
+	{
+		// "Equal (Enum)". Comparing two enum values is not a function either, and the byte == byte
+		// function refuses enum pins. Its pins are wildcards that take the enum type from the first
+		// connection: A, B, ReturnValue.
+		NewNode = NewObject<UK2Node_EnumEquality>(Graph);
+	}
+	else if (NodeType == TEXT("CallDispatcher") || NodeType == TEXT("BindDispatcher") || NodeType == TEXT("UnbindDispatcher"))
+	{
+		// Call / Bind / Unbind an Event Dispatcher, on this Blueprint or (with ownerClass) on another
+		// object such as a component. Bind's "Delegate" pin takes a CustomEvent's OutputDelegate pin.
+		FString DispatcherName;
+		if (!Params->TryGetStringField(TEXT("dispatcherName"), DispatcherName) || DispatcherName.IsEmpty())
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("missing_param: dispatcherName is required for nodeType=%s"), *NodeType));
+		}
+		FString OwnerClassName;
+		Params->TryGetStringField(TEXT("ownerClass"), OwnerClassName);
+		UClass* OwnerClass = nullptr;
+		if (!OwnerClassName.IsEmpty())
+		{
+			FString ClassError;
+			OwnerClass = ResolveClassByName(OwnerClassName, ClassError);
+			if (!OwnerClass)
+			{
+				return MakeErrorResponse(ClassError);
+			}
+		}
+		const bool bSelfContext = (OwnerClass == nullptr);
+		UClass* SearchClass = OwnerClass;
+		if (!SearchClass)
+		{
+			SearchClass = Blueprint->SkeletonGeneratedClass ? Blueprint->SkeletonGeneratedClass.Get() : Blueprint->GeneratedClass.Get();
+		}
+		FMulticastDelegateProperty* DelegateProp = SearchClass
+			? FindFProperty<FMulticastDelegateProperty>(SearchClass, FName(*DispatcherName))
+			: nullptr;
+		if (!DelegateProp)
+		{
+			return MakeErrorResponse(FString::Printf(
+				TEXT("dispatcher_not_found: %s on %s. Create it with add_variable type \"dispatcher\", compile, and pass ownerClass when it lives on another class."),
+				*DispatcherName, SearchClass ? *SearchClass->GetName() : TEXT("(no class)")));
+		}
+		UK2Node_BaseMCDelegate* DelegateNode = nullptr;
+		if (NodeType == TEXT("CallDispatcher"))
+		{
+			DelegateNode = NewObject<UK2Node_CallDelegate>(Graph);
+		}
+		else if (NodeType == TEXT("BindDispatcher"))
+		{
+			DelegateNode = NewObject<UK2Node_AddDelegate>(Graph);
+		}
+		else
+		{
+			DelegateNode = NewObject<UK2Node_RemoveDelegate>(Graph);
+		}
+		DelegateNode->SetFromProperty(DelegateProp, bSelfContext, OwnerClass ? OwnerClass : DelegateProp->GetOwnerClass());
+		NewNode = DelegateNode;
+	}
+	else if (NodeType == TEXT("GetDataTableRow"))
+	{
+		// "Get Data Table Row". Its own node class, not a function. dataTable (optional, set after the
+		// pins exist below) types the Out Row pin. Pins: execute, DataTable, RowName, then (Row Found),
+		// RowNotFound, OutRow.
+		NewNode = NewObject<UK2Node_GetDataTableRow>(Graph);
+	}
+	else if (NodeType == TEXT("Select"))
+	{
+		// "Select": picks one of its options by an index, bool or enum. Wildcard until wired; wiring an
+		// enum into Index gives one option pin per entry. Pins: Option 0, Option 1, Index, Return Value.
+		NewNode = NewObject<UK2Node_Select>(Graph);
+	}
 	else
 	{
 		return MakeErrorResponse(FString::Printf(
-			TEXT("unknown_node_type: %s (expected Event, CustomEvent, CallFunction, VariableGet, VariableSet, Branch, Sequence, Cast, Macro, InputKey, InputAxis, Self)"), *NodeType));
+			TEXT("unknown_node_type: %s (expected Event, CustomEvent, CallFunction, VariableGet, VariableSet, Branch, Sequence, Cast, Macro, InputKey, InputAxis, Self, GetArrayItem, CallParent, MakeStruct, BreakStruct, SwitchEnum, EnumEquality, Select, CallDispatcher, BindDispatcher, UnbindDispatcher, GetDataTableRow)"), *NodeType));
 	}
 
 	// Everything above this point is validation that can bail out; nothing has been
@@ -3174,6 +3335,28 @@ TSharedRef<FJsonObject> FMCPCommandHandler::AddNodeCore(UBlueprint* Blueprint, U
 	NewNode->CreateNewGuid();
 	NewNode->PostPlacedNewNode();
 	NewNode->AllocateDefaultPins();
+
+	// Get Data Table Row: its output struct type comes from the DataTable pin's value, so the table is
+	// set here, after the pins exist, and the node is told the pin changed - which is what retypes
+	// "Out Row" from wildcard to the table's row struct, exactly as picking a table in the editor does.
+	if (UK2Node_GetDataTableRow* RowNode = Cast<UK2Node_GetDataTableRow>(NewNode))
+	{
+		FString TablePath;
+		if (Params->TryGetStringField(TEXT("dataTable"), TablePath) && !TablePath.IsEmpty())
+		{
+			if (!TablePath.Contains(TEXT(".")))
+			{
+				TablePath = FString::Printf(TEXT("%s.%s"), *TablePath, *FPackageName::GetShortName(TablePath));
+			}
+			UDataTable* Table = LoadObject<UDataTable>(nullptr, *TablePath);
+			UEdGraphPin* TablePin = RowNode->GetDataTablePin();
+			if (Table && TablePin)
+			{
+				TablePin->DefaultObject = Table;
+				RowNode->PinDefaultValueChanged(TablePin);
+			}
+		}
+	}
 
 	// Optional comment, so a caller can annotate as it builds instead of needing a second
 	// call per node. AGENT_WORKFLOW.md tells agents to do exactly that.
@@ -3532,6 +3715,53 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleAddVariable(const TSharedPtr<F
 		return MakeErrorResponse(LoadError);
 	}
 
+	// An Event Dispatcher is a variable too (PC_MCDelegate), but it also needs its signature graph, and
+	// without one it compiles into nothing anybody can bind to. Same steps as the editor's own
+	// "+ Event Dispatcher" button (FBlueprintEditor::OnAddNewDelegate). Found building a stats
+	// component whose owners must hear "stats changed" on every machine.
+	if (TypeStr.Equals(TEXT("dispatcher"), ESearchCase::IgnoreCase) || TypeStr.Equals(TEXT("mcdelegate"), ESearchCase::IgnoreCase))
+	{
+		const FName DispatcherName(*VariableName);
+		if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, DispatcherName) != INDEX_NONE)
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("variable_already_exists: %s"), *VariableName));
+		}
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		const FScopedTransaction DispatcherTransaction(NSLOCTEXT("UnrealMCPBridge", "MCPAddDispatcher", "MCP: Add Event Dispatcher"));
+		Blueprint->Modify();
+		FEdGraphPinType DelegateType;
+		DelegateType.PinCategory = UEdGraphSchema_K2::PC_MCDelegate;
+		if (!FBlueprintEditorUtils::AddMemberVariable(Blueprint, DispatcherName, DelegateType))
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("add_dispatcher_failed: %s (the name may clash with an inherited member)"), *VariableName));
+		}
+		UEdGraph* SignatureGraph = FBlueprintEditorUtils::CreateNewGraph(Blueprint, DispatcherName, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+		if (!SignatureGraph)
+		{
+			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, DispatcherName);
+			return MakeErrorResponse(FString::Printf(TEXT("add_dispatcher_failed: %s (no signature graph)"), *VariableName));
+		}
+		SignatureGraph->bEditable = false;
+		K2Schema->CreateDefaultNodesForGraph(*SignatureGraph);
+		K2Schema->CreateFunctionGraphTerminators(*SignatureGraph, (UClass*)nullptr);
+		K2Schema->AddExtraFunctionFlags(SignatureGraph, (FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public));
+		K2Schema->MarkFunctionEntryAsEditable(SignatureGraph, true);
+		Blueprint->DelegateSignatureGraphs.Add(SignatureGraph);
+		if (!Category.IsEmpty())
+		{
+			FBlueprintEditorUtils::SetBlueprintVariableCategory(Blueprint, DispatcherName, nullptr, FText::FromString(Category));
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedRef<FJsonObject> DispatcherResult = MakeShared<FJsonObject>();
+		DispatcherResult->SetBoolField(TEXT("added"), true);
+		DispatcherResult->SetStringField(TEXT("name"), VariableName);
+		DispatcherResult->SetStringField(TEXT("type"), TEXT("dispatcher"));
+		DispatcherResult->SetStringField(TEXT("next"),
+			TEXT("Fire it with add_node nodeType CallDispatcher, listen with BindDispatcher wired to a CustomEvent's OutputDelegate pin. It carries no parameters."));
+		return MakeOkResponse(DispatcherResult);
+	}
+
 	FEdGraphPinType PinType;
 	FString TypeError;
 	if (!ResolvePinType(TypeStr, PinType, TypeError))
@@ -3540,6 +3770,44 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleAddVariable(const TSharedPtr<F
 	}
 
 	const FName VarFName(*VariableName);
+
+	// A LOCAL variable, scoped to one function: loop totals and scratch values belong here, not as
+	// member variables every other graph can see and every instance carries.
+	FString LocalFunctionName;
+	if (Params->TryGetStringField(TEXT("functionName"), LocalFunctionName) && !LocalFunctionName.IsEmpty())
+	{
+		UEdGraph* FunctionGraph = nullptr;
+		for (UEdGraph* Candidate : Blueprint->FunctionGraphs)
+		{
+			if (Candidate && Candidate->GetName().Equals(LocalFunctionName, ESearchCase::IgnoreCase))
+			{
+				FunctionGraph = Candidate;
+				break;
+			}
+		}
+		if (!FunctionGraph)
+		{
+			return MakeErrorResponse(FString::Printf(
+				TEXT("function_not_found: %s. Local variables live in a function graph; create it with create_function first."), *LocalFunctionName));
+		}
+		if (FBlueprintEditorUtils::FindLocalVariable(Blueprint, FunctionGraph, VarFName))
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("variable_already_exists: %s in %s"), *VariableName, *LocalFunctionName));
+		}
+		const FScopedTransaction LocalTransaction(NSLOCTEXT("UnrealMCPBridge", "MCPAddLocalVariable", "MCP: Add Local Variable"));
+		Blueprint->Modify();
+		if (!FBlueprintEditorUtils::AddLocalVariable(Blueprint, FunctionGraph, VarFName, PinType, DefaultValue))
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("add_local_variable_failed: %s in %s"), *VariableName, *LocalFunctionName));
+		}
+		TSharedRef<FJsonObject> LocalResult = MakeShared<FJsonObject>();
+		LocalResult->SetBoolField(TEXT("added"), true);
+		LocalResult->SetStringField(TEXT("name"), VariableName);
+		LocalResult->SetStringField(TEXT("type"), TypeStr);
+		LocalResult->SetStringField(TEXT("scope"), FunctionGraph->GetName());
+		return MakeOkResponse(LocalResult);
+	}
+
 	for (const FBPVariableDescription& ExistingVar : Blueprint->NewVariables)
 	{
 		if (ExistingVar.VarName == VarFName)
@@ -4558,6 +4826,7 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleFindNode(const TSharedPtr<FJso
 		TEXT("Branch"), TEXT("Sequence"), TEXT("Cast"), TEXT("Self"),
 		TEXT("Event"), TEXT("CustomEvent"), TEXT("VariableGet"), TEXT("VariableSet"),
 		TEXT("InputKey"), TEXT("InputAxis"), TEXT("EnhancedInputAction"), TEXT("CallParent"),
+		TEXT("GetArrayItem"), TEXT("MakeStruct"), TEXT("BreakStruct"), TEXT("SwitchEnum"), TEXT("EnumEquality"), TEXT("Select"), TEXT("CallDispatcher"), TEXT("BindDispatcher"), TEXT("UnbindDispatcher"), TEXT("GetDataTableRow"),
 	};
 	// Whether the query names a kind or macro EXACTLY, which is a stronger fact than merely matching
 	// one and is what licenses dropping the function hits below.
@@ -4678,6 +4947,7 @@ bool FMCPCommandHandler::DescribeNonFunctionNode(const FString& Name, TSharedRef
 		TEXT("Branch"), TEXT("Sequence"), TEXT("Cast"), TEXT("Self"),
 		TEXT("Event"), TEXT("CustomEvent"), TEXT("VariableGet"), TEXT("VariableSet"),
 		TEXT("InputKey"), TEXT("InputAxis"), TEXT("EnhancedInputAction"), TEXT("CallParent"),
+		TEXT("GetArrayItem"), TEXT("MakeStruct"), TEXT("BreakStruct"), TEXT("SwitchEnum"), TEXT("EnumEquality"), TEXT("Select"), TEXT("CallDispatcher"), TEXT("BindDispatcher"), TEXT("UnbindDispatcher"), TEXT("GetDataTableRow"),
 	};
 	for (const TCHAR* const Kind : BuiltInNodeKinds)
 	{
@@ -4904,10 +5174,32 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateFunction(const TSharedPt
 		}
 	}
 
+	// Pure (no exec pins, green) and Const - the Details panel's two checkboxes. A getter with an
+	// output was otherwise always impure, and an impure call whose only wire is its return value
+	// silently never runs and returns the default (see the memory note on this; it blocked all
+	// damage once). Getters that every system reads belong pure.
+	bool bPure = false, bConst = false;
+	Params->TryGetBoolField(TEXT("pure"), bPure);
+	Params->TryGetBoolField(TEXT("const"), bConst);
+	if (bPure || bConst)
+	{
+		int32 ExtraFlags = Entry->GetExtraFlags();
+		if (bPure)
+		{
+			ExtraFlags |= FUNC_BlueprintPure;
+		}
+		if (bConst)
+		{
+			ExtraFlags |= FUNC_Const;
+		}
+		Entry->SetExtraFlags(ExtraFlags);
+	}
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("graphName"), NewGraph->GetName());
+	Result->SetBoolField(TEXT("pure"), bPure);
 	Result->SetStringField(TEXT("entryNodeId"), MakeNodeId(Entry));
 	if (ResultNode)
 	{
@@ -5775,6 +6067,29 @@ static UEdGraphPin* ResolvePinForgivingly(UEdGraphNode* Node, const FString& Req
 		{
 			OutCorrection = FString::Printf(TEXT("'%s' -> '%s'"), *Requested, *Pin->PinName.ToString());
 			return Pin;
+		}
+		// A user-defined struct's field pins (Make/Break Struct, Data Table Out Row splits) are named
+		// "Stat_2_113BDA70..." internally and shown as "Stat". Match the name a person sees: the
+		// friendly name, or the internal name with its _<n>_<GUID> tail cut off.
+		if (!Pin->PinFriendlyName.IsEmpty() && Normalise(Pin->PinFriendlyName.ToString()) == Wanted)
+		{
+			OutCorrection = FString::Printf(TEXT("'%s' -> '%s'"), *Requested, *Pin->PinName.ToString());
+			return Pin;
+		}
+		{
+			const FString Internal = Pin->PinName.ToString();
+			int32 LastUnderscore = INDEX_NONE;
+			if (Internal.FindLastChar(TEXT('_'), LastUnderscore) && Internal.Len() - LastUnderscore - 1 == 32)
+			{
+				const FString WithoutGuid = Internal.Left(LastUnderscore);
+				int32 IndexUnderscore = INDEX_NONE;
+				if (WithoutGuid.FindLastChar(TEXT('_'), IndexUnderscore) && WithoutGuid.Mid(IndexUnderscore + 1).IsNumeric()
+					&& Normalise(WithoutGuid.Left(IndexUnderscore)) == Wanted)
+				{
+					OutCorrection = FString::Printf(TEXT("'%s' -> '%s'"), *Requested, *Internal);
+					return Pin;
+				}
+			}
 		}
 		if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
 		{

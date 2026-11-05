@@ -1902,14 +1902,23 @@ register(
       "Pins: execute, Object, then, CastFailed, As<Class>.\n" +
       '  - "Macro": macroName required, from the engine\'s standard macro library: ForEachLoop, ForLoop, WhileLoop, ' +
       "DoOnce, DoN, Gate, FlipFlop, IsValid, etc. A wrong name returns the full list of available macros. NOTE: macro " +
-      'nodes name their input exec pin "Exec" (capital E), unlike regular nodes\' "execute".\n\n' +
+      'nodes name their input exec pin "Exec" (capital E), unlike regular nodes\' "execute".\n' +
+      '  - "MakeStruct" / "BreakStruct": structName required. One input (Make) or output (Break) pin per field, named ' +
+      "after the field; Make's output and Break's input are named after the struct.\n" +
+      '  - "SwitchEnum": enumName required. Input "Selection", one exec output per entry by display name.\n' +
+      '  - "EnumEquality": "Equal (Enum)". Pins A, B, ReturnValue; wildcard until A or B is wired.\n' +
+      '  - "Select": picks an option by Index (int, bool or enum). Pins "Option 0", "Option 1", "Index", ' +
+      '"ReturnValue"; wildcard until wired.\n' +
+      '  - "CallDispatcher" / "BindDispatcher" / "UnbindDispatcher": dispatcherName required; ownerClass when the ' +
+      "dispatcher lives on another class (wire that object into `self`). Bind's \"Delegate\" pin takes a CustomEvent's " +
+      '"OutputDelegate" pin.\n\n' +
       "Do NOT pass x/y. Omitted, a node is placed beside whatever it connects to; passed, it goes exactly where you " +
       "guessed - and a graph that already has nodes has no gaps, so a guess lands on existing work. comment is an " +
       "optional one-line annotation saying WHY the node exists; put anything longer on a comment box.",
     inputSchema: {
       path: z.string().describe('Blueprint path; /Game/UI/BP_Foo and /Game/UI/BP_Foo.BP_Foo both work.'),
       graphName: z.string().describe('Graph name to add the node to, e.g. "EventGraph".'),
-      nodeType: z.enum(["Event", "CustomEvent", "EnhancedInputAction", "InputKey", "InputAxis", "CallFunction", "VariableGet", "VariableSet", "Branch", "Sequence", "GetArrayItem", "Cast", "Macro", "CallParent", "Self"]),
+      nodeType: z.enum(["Event", "CustomEvent", "EnhancedInputAction", "InputKey", "InputAxis", "CallFunction", "VariableGet", "VariableSet", "Branch", "Sequence", "GetArrayItem", "Cast", "Macro", "CallParent", "Self", "MakeStruct", "BreakStruct", "SwitchEnum", "EnumEquality", "Select", "CallDispatcher", "BindDispatcher", "UnbindDispatcher", "GetDataTableRow"]),
       eventName: z.string().optional().describe("Required for nodeType Event or CustomEvent."),
       inputAction: z
         .string()
@@ -1948,6 +1957,16 @@ register(
             'rather than this Blueprint - e.g. "ACME_GameInstance_C" for a variable read off a cast result. Wire ' +
             "the node's `self` pin to that object. Omit for this Blueprint's own or inherited variables."
         ),
+      structName: z
+        .string()
+        .optional()
+        .describe('Required for nodeType MakeStruct / BreakStruct: the struct, e.g. "S_ItemData" or "Vector". Pins are named after its fields.'),
+      enumName: z
+        .string()
+        .optional()
+        .describe('Required for nodeType SwitchEnum: the enum, e.g. "E_WeaponType". One exec output per entry, named by display name.'),
+      dispatcherName: z.string().optional().describe("Required for nodeType CallDispatcher / BindDispatcher / UnbindDispatcher."),
+      dataTable: z.string().optional().describe("For nodeType GetDataTableRow: the table, e.g. /Game/Data/DT_Items. Types the OutRow pin."),
       targetClass: z.string().optional().describe("Required for nodeType Cast: the class to cast to."),
       pure: z.boolean().optional().describe("Cast only: true for the pure (no exec pins) form. Defaults to false."),
       macroName: z.string().optional().describe('Required for nodeType Macro, e.g. "ForEachLoop", "WhileLoop", "DoOnce".'),
@@ -1956,7 +1975,7 @@ register(
       comment: z.string().optional().describe("Optional node comment explaining why this node exists."),
     },
   },
-  async ({ path, graphName, nodeType, eventName, inputAction, key, axisName, netMode, reliable, inputs, functionName, className, variableName, ownerClass, targetClass, pure, macroName, x, y, comment }) => {
+  async ({ path, graphName, nodeType, eventName, inputAction, key, axisName, netMode, reliable, inputs, functionName, className, variableName, ownerClass, structName, enumName, dispatcherName, dataTable, targetClass, pure, macroName, x, y, comment }) => {
     try {
       const result = await bridge.send<AddNodeResult>("add_node", {
         path,
@@ -1973,6 +1992,10 @@ register(
         className,
         variableName,
         ownerClass,
+        structName,
+        enumName,
+        dispatcherName,
+        dataTable,
         targetClass,
         pure,
         macroName,
@@ -2118,6 +2141,8 @@ register(
       "(\"map<name,int>\" for a score per player, \"map<name,object:Actor>\"). Two parallel arrays is the shape " +
       "this replaces. A map key must be hashable - int, name, string, enum and object references are; vector, text " +
       "and hashless structs are refused with the reason.\n\n" +
+      "type \"dispatcher\" makes an Event Dispatcher (no parameters); fire it with add_node CallDispatcher and listen with BindDispatcher. " +
+      "functionName makes a LOCAL variable inside that function instead of a member.\n\n" +
       "Fails if a variable with that name already exists on this Blueprint.",
     inputSchema: {
       path: z.string().describe('Blueprint path; /Game/UI/BP_Foo and /Game/UI/BP_Foo.BP_Foo both work.'),
@@ -2130,9 +2155,10 @@ register(
         ),
       category: z.string().optional().describe("Optional category for grouping in the editor's My Blueprint panel."),
       defaultValue: z.string().optional().describe("Optional literal default value, string-serialized."),
+      functionName: z.string().optional().describe("Make it a LOCAL variable of this function graph instead of a member."),
     },
   },
-  async ({ path, variableName, type, category, defaultValue }) => {
+  async ({ path, variableName, type, category, defaultValue, functionName }) => {
     try {
       // Translate the C++ spelling before sending. A model that has just read a header via
       // unreal_find_source writes FVector, and the bridge takes "vector"; see engineTypes.ts.
@@ -2142,6 +2168,7 @@ register(
         type: normaliseEngineType(type),
         category,
         defaultValue,
+        functionName,
       });
 
       // Say it here, where the decision was just made.
@@ -2983,7 +3010,7 @@ register(
         .array(
           z.object({
             ref: z.string().describe("Your short handle for this node, unique in the batch, no dots."),
-            nodeType: z.enum(["Event", "CustomEvent", "EnhancedInputAction", "InputKey", "InputAxis", "CallFunction", "VariableGet", "VariableSet", "Branch", "Sequence", "GetArrayItem", "Cast", "Macro", "CallParent", "Self"]),
+            nodeType: z.enum(["Event", "CustomEvent", "EnhancedInputAction", "InputKey", "InputAxis", "CallFunction", "VariableGet", "VariableSet", "Branch", "Sequence", "GetArrayItem", "Cast", "Macro", "CallParent", "Self", "MakeStruct", "BreakStruct", "SwitchEnum", "EnumEquality", "Select", "CallDispatcher", "BindDispatcher", "UnbindDispatcher", "GetDataTableRow"]),
             eventName: z.string().optional(),
             // The four that were missing.
             //
@@ -2997,6 +3024,10 @@ register(
             reliable: z.boolean().optional(),
             inputs: z.array(z.object({ name: z.string(), type: z.string() })).optional(),
             ownerClass: z.string().optional(),
+            structName: z.string().optional(),
+            enumName: z.string().optional(),
+            dispatcherName: z.string().optional(),
+            dataTable: z.string().optional(),
             inputAction: z.string().optional(),
             key: z.string().optional(),
             axisName: z.string().optional(),
@@ -3422,9 +3453,14 @@ register(
         .array(z.object({ name: z.string(), type: z.string() }))
         .optional()
         .describe('Function return values, e.g. [{"name":"bDied","type":"bool"}].'),
+      pure: z
+        .boolean()
+        .optional()
+        .describe("Pure: no exec pins, runs wherever its output is read. Right for getters; never for anything that changes state."),
+      const: z.boolean().optional().describe("Const: the function promises not to modify the object."),
     },
   },
-  async ({ path, functionName: functionNameRaw, name, inputs, outputs }) => {
+  async ({ path, functionName: functionNameRaw, name, inputs, outputs, pure, const: isConst }) => {
     const functionName = functionNameRaw ?? name;
     if (!functionName) {
       return errorResult(
@@ -3439,6 +3475,8 @@ register(
         functionName,
         inputs: normaliseFieldTypes(inputs),
         outputs: normaliseFieldTypes(outputs),
+        pure,
+        const: isConst,
       });
       return jsonResult(result);
     } catch (err) {
