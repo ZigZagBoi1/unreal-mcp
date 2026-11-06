@@ -1851,11 +1851,23 @@ register(
         .boolean()
         .optional()
         .describe("Whether to save the new asset to disk immediately. Defaults to true."),
+      blueprintType: z
+        .enum(["Normal", "FunctionLibrary", "Interface"])
+        .optional()
+        .describe(
+          'The kind of Blueprint. "FunctionLibrary" makes a Blueprint Function Library and "Interface" a Blueprint ' +
+            "Interface; for both, parentClass is ignored (pass anything). Defaults to Normal."
+        ),
     },
   },
-  async ({ packagePath, parentClass, save }) => {
+  async ({ packagePath, parentClass, save, blueprintType }) => {
     try {
-      const result = await bridge.send<CreateBlueprintResult>("create_blueprint", { packagePath, parentClass, save });
+      const result = await bridge.send<CreateBlueprintResult>("create_blueprint", {
+        packagePath,
+        parentClass,
+        save,
+        ...(blueprintType ? { blueprintType } : {}),
+      });
       return jsonResult(result);
     } catch (err) {
       return errorResult(err);
@@ -3483,9 +3495,16 @@ register(
         .optional()
         .describe("Pure: no exec pins, runs wherever its output is read. Right for getters; never for anything that changes state."),
       const: z.boolean().optional().describe("Const: the function promises not to modify the object."),
+      override: z
+        .boolean()
+        .optional()
+        .describe(
+          "Implement a parent class function (the editor's Functions > Override) instead of declaring a new one. " +
+            'Use the C++ name, e.g. "BP_GetDesiredInputConfig". The signature comes from the parent; inputs/outputs are ignored.'
+        ),
     },
   },
-  async ({ path, functionName: functionNameRaw, name, inputs, outputs, pure, const: isConst }) => {
+  async ({ path, functionName: functionNameRaw, name, inputs, outputs, pure, const: isConst, override }) => {
     const functionName = functionNameRaw ?? name;
     if (!functionName) {
       return errorResult(
@@ -3502,6 +3521,7 @@ register(
         outputs: normaliseFieldTypes(outputs),
         pure,
         const: isConst,
+        ...(override ? { override: true } : {}),
       });
       return jsonResult(result);
     } catch (err) {

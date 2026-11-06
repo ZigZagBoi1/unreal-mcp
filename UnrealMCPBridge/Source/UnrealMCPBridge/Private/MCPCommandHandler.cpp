@@ -2510,6 +2510,31 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateBlueprint(const TSharedP
 		return MakeErrorResponse(FString::Printf(TEXT("package_already_exists: %s"), *PackagePath));
 	}
 
+	// blueprintType: "Normal" (default), "FunctionLibrary" or "Interface".
+	//
+	// A function library or an interface is not a Blueprint whose parent happens to be
+	// BlueprintFunctionLibrary or Interface: the Blueprint TYPE is what makes the editor treat it as
+	// one. Passing those classes as a plain parent either refuses (function library is not
+	// blueprintable) or, worse, makes a normal Blueprint that looks like an interface and is not.
+	FString BlueprintTypeName = TEXT("Normal");
+	Params->TryGetStringField(TEXT("blueprintType"), BlueprintTypeName);
+	EBlueprintType BlueprintType = BPTYPE_Normal;
+	if (BlueprintTypeName.Equals(TEXT("FunctionLibrary"), ESearchCase::IgnoreCase))
+	{
+		BlueprintType = BPTYPE_FunctionLibrary;
+		ParentClassName = TEXT("/Script/Engine.BlueprintFunctionLibrary");
+	}
+	else if (BlueprintTypeName.Equals(TEXT("Interface"), ESearchCase::IgnoreCase))
+	{
+		BlueprintType = BPTYPE_Interface;
+		ParentClassName = TEXT("/Script/CoreUObject.Interface");
+	}
+	else if (!BlueprintTypeName.Equals(TEXT("Normal"), ESearchCase::IgnoreCase))
+	{
+		return MakeErrorResponse(FString::Printf(
+			TEXT("bad_param: blueprintType '%s' - use Normal, FunctionLibrary or Interface"), *BlueprintTypeName));
+	}
+
 	FString ClassError;
 	UClass* ParentClass = ResolveClassByName(ParentClassName, ClassError);
 	if (!ParentClass)
@@ -2534,9 +2559,11 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateBlueprint(const TSharedP
 			*ParentClass->GetName()));
 	}
 
-	if (!FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
+	if (BlueprintType == BPTYPE_Normal && !FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
 	{
-		return MakeErrorResponse(FString::Printf(TEXT("class_not_blueprintable: %s"), *ParentClass->GetName()));
+		return MakeErrorResponse(FString::Printf(
+			TEXT("class_not_blueprintable: %s (for a function library or interface pass blueprintType)"),
+			*ParentClass->GetName()));
 	}
 
 	const FString AssetName = FPackageName::GetShortName(PackagePath);
@@ -2555,7 +2582,7 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateBlueprint(const TSharedP
 		ParentClass,
 		Package,
 		FName(*AssetName),
-		BPTYPE_Normal,
+		BlueprintType,
 		UBlueprint::StaticClass(),
 		UBlueprintGeneratedClass::StaticClass(),
 		FName("MCPBridge"));
@@ -5205,6 +5232,42 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleCreateFunction(const TSharedPt
 	if (!ParsePinArray(TEXT("inputs"), Inputs, ParseError) || !ParsePinArray(TEXT("outputs"), Outputs, ParseError))
 	{
 		return MakeErrorResponse(ParseError);
+	}
+
+	// override: true implements a parent class function instead of declaring a new one - what the
+	// editor's Functions > Override menu does. Without it a child can only declare a function of the
+	// same name, which fails to compile ("name already used"), and every BlueprintImplementableEvent
+	// that returns a value (CommonUI's Get Desired Input Config, Get Desired Focus Target...) was out
+	// of reach. The signature comes from the parent, so inputs/outputs are ignored.
+	bool bOverride = false;
+	Params->TryGetBoolField(TEXT("override"), bOverride);
+	if (bOverride)
+	{
+		UFunction* ParentFunction = Blueprint->ParentClass
+			? Blueprint->ParentClass->FindFunctionByName(FName(*FunctionName))
+			: nullptr;
+		if (!ParentFunction)
+		{
+			return MakeErrorResponse(FString::Printf(
+				TEXT("no_parent_function: %s has no function '%s' to override (use the C++ name, e.g. BP_GetDesiredInputConfig)"),
+				Blueprint->ParentClass ? *Blueprint->ParentClass->GetName() : TEXT("<none>"), *FunctionName));
+		}
+		if (!UEdGraphSchema_K2::CanKismetOverrideFunction(ParentFunction))
+		{
+			return MakeErrorResponse(FString::Printf(TEXT("not_overridable: %s"), *FunctionName));
+		}
+		const FScopedTransaction OverrideTransaction(NSLOCTEXT("UnrealMCPBridge", "MCPOverrideFunction", "MCP: Override Function"));
+		Blueprint->Modify();
+		UEdGraph* OverrideGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint, ParentFunction->GetFName(), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+		FBlueprintEditorUtils::AddFunctionGraph<UClass>(
+			Blueprint, OverrideGraph, /*bIsUserCreated=*/false, ParentFunction->GetOwnerClass());
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		TSharedRef<FJsonObject> OverrideResult = MakeShared<FJsonObject>();
+		OverrideResult->SetStringField(TEXT("graphName"), OverrideGraph->GetName());
+		OverrideResult->SetBoolField(TEXT("override"), true);
+		OverrideResult->SetStringField(TEXT("overrides"), ParentFunction->GetOwnerClass()->GetName());
+		return MakeOkResponse(OverrideResult);
 	}
 
 	const FScopedTransaction Transaction(NSLOCTEXT("UnrealMCPBridge", "MCPCreateFunction", "MCP: Create Function"));
