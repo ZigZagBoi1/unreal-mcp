@@ -3,7 +3,7 @@
 Last updated: 2026-08-08
 
 Status: **complete and live-verified.** Released as
-[v0.1.0-ue5.6](https://github.com/ZiggyMar/unreal-mcp/releases/tag/v0.1.0-ue5.6).
+[v0.1.0-ue5.6](https://github.com/ZigZagBoi1/unreal-mcp/releases/tag/v0.1.0-ue5.6).
 
 ## TL;DR
 

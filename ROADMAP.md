@@ -46,8 +46,8 @@ reliably knows UE's exact node names, pin names, and function signatures.
   editor transaction so a human can Ctrl+Z the agent's work; and `add_node` places `Branch`,
   `Sequence`, `Cast`, and standard-library macros, verified by building and compiling a real
   conditional graph through the bridge alone. Live-verified on both engines.
-- **Releases published**: [v0.2.0-ue5.8](https://github.com/ZiggyMar/unreal-mcp/releases/tag/v0.2.0-ue5.8)
-  and [v0.2.0-ue5.6](https://github.com/ZiggyMar/unreal-mcp/releases/tag/v0.2.0-ue5.6)
+- **Releases published**: [v0.2.0-ue5.8](https://github.com/ZigZagBoi1/unreal-mcp/releases/tag/v0.2.0-ue5.8)
+  and [v0.2.0-ue5.6](https://github.com/ZigZagBoi1/unreal-mcp/releases/tag/v0.2.0-ue5.6)
   (v0.1.0 releases remain available).
 - **Competitive survey** of 9 other Unreal MCP projects, including which of their ideas are worth
   adopting. See [docs/COMPETITIVE_LANDSCAPE.md](docs/COMPETITIVE_LANDSCAPE.md).
