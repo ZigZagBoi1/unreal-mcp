@@ -2223,11 +2223,33 @@ register(
           '"replicated" sends the value to clients. "repnotify" also calls OnRep_<Name> on them when it changes, ' +
             'which is what you want when clients must react rather than just read. "none" turns it off.'
         ),
+      condition: z
+        .enum([
+          "none",
+          "initialOnly",
+          "ownerOnly",
+          "skipOwner",
+          "simulatedOnly",
+          "autonomousOnly",
+          "simulatedOrPhysics",
+          "initialOrOwner",
+          "custom",
+          "replayOrOwner",
+          "replayOnly",
+          "skipReplay",
+        ])
+        .optional()
+        .describe(
+          "Who receives it. Left as it is when omitted. ownerOnly is for what only the owning player needs " +
+            "(ammo, recoil, their own tuning); initialOnly sends once at spawn and never again, for values " +
+            "that are fixed for the actor's life; skipOwner is for what the owner already predicted. A condition " +
+            "that is too narrow looks exactly like a variable that does not replicate, so test with a second player."
+        ),
     },
   },
-  async ({ path, variableName, mode }) => {
+  async ({ path, variableName, mode, condition }) => {
     try {
-      return jsonResult(await bridge.send("set_variable_replication", { path, variableName, mode }));
+      return jsonResult(await bridge.send("set_variable_replication", { path, variableName, mode, condition }));
     } catch (err) {
       return errorResult(err);
     }
@@ -4427,11 +4449,19 @@ register(
             "anything they own will not work in that session."
         ),
       listenServer: z.boolean().optional().describe("Run the first client as a listen server, the usual multiplayer setup. Defaults to false."),
+      dedicatedServer: z
+        .boolean()
+        .optional()
+        .describe(
+          "Run a windowless dedicated server and connect every player to it as a client, so numPlayers is the " +
+            "number of clients. This is the only mode with no local player on the server, which is what exposes " +
+            "player-0 lookups and UI created server-side - a listen server hides both. Overrides listenServer."
+        ),
     },
   },
-  async ({ numPlayers, listenServer, ignoreCompileErrors }) => {
+  async ({ numPlayers, listenServer, ignoreCompileErrors, dedicatedServer }) => {
     try {
-      const result = await bridge.send("start_pie", { numPlayers, listenServer, ignoreCompileErrors });
+      const result = await bridge.send("start_pie", { numPlayers, listenServer, ignoreCompileErrors, dedicatedServer });
       // Remember, so compile/save can refuse before they crash the editor. See pieGuard.ts.
       pieBelievedRunning = true;
       return jsonResult(result);

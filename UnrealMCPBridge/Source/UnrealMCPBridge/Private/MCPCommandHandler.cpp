@@ -4529,6 +4529,56 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetVariableReplication(const T
 			TEXT("bad_param: mode \"%s\" is not one of \"none\", \"replicated\", \"repnotify\"."), *Mode));
 	}
 
+	// Who receives it. Optional, and left exactly as it was when not given - changing a variable's
+	// mode must not quietly reset a condition somebody chose on purpose.
+	static const TMap<FString, ELifetimeCondition> ConditionNames = {
+		{ TEXT("none"), COND_None },
+		{ TEXT("initialonly"), COND_InitialOnly },
+		{ TEXT("owneronly"), COND_OwnerOnly },
+		{ TEXT("skipowner"), COND_SkipOwner },
+		{ TEXT("simulatedonly"), COND_SimulatedOnly },
+		{ TEXT("autonomousonly"), COND_AutonomousOnly },
+		{ TEXT("simulatedorphysics"), COND_SimulatedOrPhysics },
+		{ TEXT("initialorowner"), COND_InitialOrOwner },
+		{ TEXT("custom"), COND_Custom },
+		{ TEXT("replayorowner"), COND_ReplayOrOwner },
+		{ TEXT("replayonly"), COND_ReplayOnly },
+		{ TEXT("skipreplay"), COND_SkipReplay },
+	};
+	FString ConditionRaw;
+	bool bHasCondition = false;
+	ELifetimeCondition WantedCondition = COND_None;
+	if (Params->TryGetStringField(TEXT("condition"), ConditionRaw) && !ConditionRaw.IsEmpty())
+	{
+		const ELifetimeCondition* Found = ConditionNames.Find(ConditionRaw.ToLower());
+		if (!Found)
+		{
+			return MakeErrorResponse(FString::Printf(
+				TEXT("bad_param: condition \"%s\" is not one of none, initialOnly, ownerOnly, skipOwner, simulatedOnly, ")
+				TEXT("autonomousOnly, simulatedOrPhysics, initialOrOwner, custom, replayOrOwner, replayOnly, skipReplay."),
+				*ConditionRaw));
+		}
+		if (Wanted == TEXT("none") && *Found != COND_None)
+		{
+			return MakeErrorResponse(
+				TEXT("bad_param: a condition only means something on a variable that replicates. Use mode \"replicated\" ")
+				TEXT("or \"repnotify\" with it."));
+		}
+		bHasCondition = true;
+		WantedCondition = *Found;
+	}
+	auto ConditionName = [](ELifetimeCondition Condition) -> FString
+	{
+		for (const TPair<FString, ELifetimeCondition>& Pair : ConditionNames)
+		{
+			if (Pair.Value == Condition)
+			{
+				return Pair.Key;
+			}
+		}
+		return TEXT("none");
+	};
+
 	FString LoadError;
 	UBlueprint* Blueprint = LoadBlueprintByPath(Path, LoadError);
 	if (!Blueprint)
@@ -4569,6 +4619,28 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetVariableReplication(const T
 	const bool bWasReplicated = (Description.PropertyFlags & CPF_Net) != 0;
 	const bool bWasRepNotify = (Description.PropertyFlags & CPF_RepNotify) != 0;
 	const FString Before = bWasRepNotify ? TEXT("repnotify") : (bWasReplicated ? TEXT("replicated") : TEXT("none"));
+	const ELifetimeCondition ConditionBefore = Description.ReplicationCondition;
+	const bool bConditionChanges = bHasCondition && WantedCondition != ConditionBefore;
+	if (Before == Wanted && bConditionChanges)
+	{
+		// Same mode, different audience. Nothing about the OnRep graph or the flags moves.
+		const FScopedTransaction ConditionTransaction(
+			NSLOCTEXT("UnrealMCPBridge", "MCPSetVariableRepCondition", "MCP: Set Replication Condition"));
+		Blueprint->Modify();
+		Description.ReplicationCondition = WantedCondition;
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedRef<FJsonObject> Changed = MakeShared<FJsonObject>();
+		Changed->SetStringField(TEXT("variable"), VariableName);
+		Changed->SetStringField(TEXT("mode"), Wanted);
+		Changed->SetStringField(TEXT("conditionWas"), ConditionName(ConditionBefore));
+		Changed->SetStringField(TEXT("condition"), ConditionName(WantedCondition));
+		Changed->SetBoolField(TEXT("changed"), true);
+		Changed->SetStringField(TEXT("next"),
+			TEXT("compile_blueprint, then save_blueprint. Then run it with a second player: a condition that is "
+				 "too narrow looks exactly like a variable that does not replicate."));
+		return MakeOkResponse(Changed);
+	}
 	if (Before == Wanted)
 	{
 		TSharedRef<FJsonObject> Same = MakeShared<FJsonObject>();
@@ -4647,10 +4719,20 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleSetVariableReplication(const T
 		}
 	}
 
+	if (Wanted == TEXT("none"))
+	{
+		Description.ReplicationCondition = COND_None;
+	}
+	else if (bHasCondition)
+	{
+		Description.ReplicationCondition = WantedCondition;
+	}
+
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetStringField(TEXT("variable"), VariableName);
+	Result->SetStringField(TEXT("condition"), ConditionName(Description.ReplicationCondition));
 	Result->SetStringField(TEXT("was"), Before);
 	Result->SetStringField(TEXT("mode"), Wanted);
 	Result->SetBoolField(TEXT("changed"), true);
@@ -7178,10 +7260,21 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleStartPie(const TSharedPtr<FJso
 	{
 		Params->TryGetBoolField(TEXT("listenServer"), bListenServer);
 	}
+	// A dedicated server has no local player at all, which is the one thing a listen server can
+	// never show: "player 0" is somebody else's controller, no widget may be created, and nothing
+	// cosmetic should run. PIE_Client starts that server in-process, windowless, and connects every
+	// client to it - so numPlayers is the number of CLIENTS, and one is enough to be a real test.
+	bool bDedicatedServer = false;
+	if (Params.IsValid())
+	{
+		Params->TryGetBoolField(TEXT("dedicatedServer"), bDedicatedServer);
+	}
 
 	ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
 	PlaySettings->SetPlayNumberOfClients(NumPlayers);
-	PlaySettings->SetPlayNetMode(bListenServer && NumPlayers > 1 ? PIE_ListenServer : PIE_Standalone);
+	PlaySettings->SetPlayNetMode(bDedicatedServer
+		? PIE_Client
+		: (bListenServer && NumPlayers > 1 ? PIE_ListenServer : PIE_Standalone));
 	PlaySettings->SetRunUnderOneProcess(true);
 
 	FRequestPlaySessionParams SessionParams;
@@ -7205,7 +7298,15 @@ TSharedRef<FJsonObject> FMCPCommandHandler::HandleStartPie(const TSharedPtr<FJso
 				"session. Fine when they are unrelated to what you are testing; misleading if they are not."));
 	}
 	Result->SetNumberField(TEXT("numPlayers"), NumPlayers);
-	Result->SetBoolField(TEXT("listenServer"), bListenServer);
+	Result->SetBoolField(TEXT("listenServer"), bListenServer && !bDedicatedServer);
+	Result->SetBoolField(TEXT("dedicatedServer"), bDedicatedServer);
+	if (bDedicatedServer)
+	{
+		Result->SetStringField(TEXT("dedicatedNote"),
+			TEXT("The server world has no window and no local player; pie_status names it DedicatedServer and the "
+				"clients Client0, Client1. Anything that reads player 0 or creates a widget on the server is "
+				"what this mode exists to catch - read_runtime_errors after it has run."));
+	}
 	Result->SetStringField(TEXT("note"), TEXT("PIE starts on the next editor tick; poll pie_status and read the editor log for runtime errors"));
 	return MakeOkResponse(Result);
 }
