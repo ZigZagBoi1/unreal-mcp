@@ -296,27 +296,23 @@ Once registered, open your project in the Unreal Editor and verify the connectio
 For more configuration options and details, see [`mcp-server/README.md`](mcp-server/README.md).
 
 
-## What CI covers, and what it does not
+## What the automated checks cover, and what they do not
 
-**Status: the workflow is committed but has never run.** GitHub refused to start it - *"the job was
-not started because your account is locked due to a billing issue"* - so no badge is shown here. A
-badge reading "failing" for a billing reason would say something false about the code. The workflow
-is structurally valid and the whole suite is verified to pass locally with no editor running, which
-is the same thing it does on a runner; that is a claim about local runs, not a CI result.
+**Status: there is no CI workflow in this repository yet.** The checks below are run locally with
+`npm test` inside `mcp-server/`, with no editor running.
 
-The badge above covers the parts that need no Unreal install, run on a clean Linux machine with
-nothing preinstalled: build, typecheck, tool/bridge parity, documentation guards, profile token
-budgets, strict-client protocol conformance, and the unit tests - on the oldest Node the README
-promises and on the current one. It also checks that `--doctor` and `--print-config` behave
-correctly with **no editor running**, since that is exactly when someone reaches for them.
+They cover the parts that need no Unreal install: build, typecheck, tool/bridge parity,
+documentation guards, profile token budgets, strict-client protocol conformance, and the unit tests.
+They also check that `--doctor` and `--print-config` behave correctly with **no editor running**,
+since that is exactly when someone reaches for them.
 
-It does **not** run live verification or the local-model benchmark. Those need a running editor, and
+They do **not** run live verification or the local-model benchmark. Those need a running editor, and
 one needs a GPU. Their results live in [docs/LIVE_VERIFICATION.md](docs/LIVE_VERIFICATION.md) and
 [docs/LOCAL_MODEL_BENCHMARK.md](docs/LOCAL_MODEL_BENCHMARK.md), and they are run by hand against both
-engine versions. Claiming them in CI would make the badge mean less than it does.
+engine versions. Claiming them as automated would make the checks mean less than they do.
 
-The C++ plugin is not compiled in CI either, because Epic does not ship an engine that can be
-fetched there. `npm run build:engines` builds it against every configured engine locally and reports
+The C++ plugin is not compiled by them either, because Epic does not ship an engine that can be
+fetched by a build machine. `npm run build:engines` builds it against every configured engine locally and reports
 success only if every one of them actually built.
 
 ## Contributing
