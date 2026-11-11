@@ -116,7 +116,7 @@ requests rather than guessed:
    fix" from "gets you to the last step".
 3. **Memory between sessions.** Every session re-derives the project from scratch. Which system is
    live and which was abandoned, what was decided and why - that currently survives only in documents
-   written by hand and re-read on purpose (`docs/ACME_SKIN_SYSTEM.md` exists because getting this
+   written by hand and re-read on purpose (one such write-up exists only because getting this
    wrong cost a whole iteration of work on a dead system). A lead programmer's real value is
    accumulated context, and none of it is accumulating.
 4. **Subsystems with no coverage at all:** Gameplay Ability System, State Trees, EQS, AnimGraph

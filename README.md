@@ -2,7 +2,9 @@
 
 ![Unreal MCP Hero Demo](docs/images/hero.gif)
 
-An MCP server that allows AI agents (Claude, Cursor) to directly control and manipulate Unreal Engine.
+**The most advanced MCP server for Unreal Engine. Free and open source (MIT), forever.**
+
+It gives AI agents (Claude, Cursor, any MCP client) real hands inside a running Unreal Editor: read a project it did not write, find bugs in plain English, build whole Blueprint systems, then run the game on a listen or dedicated server and prove the work. No paid tier, no account, no engine source build.
 
 This server lets Claude (or any MCP client) read and edit Unreal Engine 5.6/5.8 Blueprints directly, without burning your context window on raw engine JSON, and without needing anything beyond a stock Epic Games Launcher install.
 
